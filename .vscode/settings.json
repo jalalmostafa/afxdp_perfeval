@@ -1,0 +1,10 @@
+{
+    "makefile.extensionOutputFolder": "./.vscode",
+    "files.associations": {
+        "*.props": "xml",
+        "*.targets": "xml",
+        "daq.skel.h": "c",
+        "bpf_helpers.h": "c",
+        "bpf.h": "c"
+    }
+}
