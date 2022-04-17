@@ -66,4 +66,4 @@ dkms.conf
 *.vsix
 
 # Project-specific
-bin/
+daq

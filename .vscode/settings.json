@@ -3,8 +3,16 @@
     "files.associations": {
         "*.props": "xml",
         "*.targets": "xml",
-        "daq.skel.h": "c",
-        "bpf_helpers.h": "c",
-        "bpf.h": "c"
+        "if_link.h": "c",
+        "if.h": "c",
+        "stdio.h": "c",
+        "resource.h": "c",
+        "bpf.h": "c",
+        "libxdp.h": "c",
+        "xsk.h": "c",
+        "err.h": "c",
+        "netdevice.h": "c",
+        "if_packet.h": "c",
+        "if_ether.h": "c"
     }
 }
