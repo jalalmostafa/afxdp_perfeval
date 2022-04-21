@@ -32,6 +32,6 @@ Teardown the environment: `t teardown`
 ### Ubuntu
 
 ```bash
-apt install clang llvm libelf-dev libpcap-dev gcc-multilib build-essential linux-tools-common linux-tools-generic linux-headers-$(uname -r)
+apt install clang llvm libelf-dev libbpf-dev libpcap-dev gcc-multilib build-essential linux-tools-common linux-tools-generic linux-headers-$(uname -r)
 make
 ```

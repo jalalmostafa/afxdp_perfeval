@@ -13,7 +13,7 @@
 #include <xdp/libxdp.h>
 #include <xdp/xsk.h>
 
-#define UMEM_LEN 1024
+#define UMEM_LEN 100
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 #define FRAME_INVALID -1
 
@@ -73,6 +73,14 @@ static void umem_info_free(umem_info* info)
     }
 }
 
+#define NONZERO(x)                         \
+    do {                                   \
+        if (x) {                           \
+            printf("Line %d\n", __LINE__); \
+            return x;                      \
+        }                                  \
+    } while (0)
+
 static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
 {
     int ret = 0;
@@ -82,8 +90,11 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
         return EINVAL;
     }
 
+    printf("umem**: %p, buffer: %p, size: %d, fq: %p, cq: %p, config: %p\n", &umem->umem, umem->buffer, UMEM_LEN,
+        &umem->fill_ring, &umem->comp_ring, NULL);
     ret = xsk_umem__create(&umem->umem, umem->buffer, UMEM_LEN,
         &umem->fill_ring, &umem->comp_ring, NULL);
+    NONZERO(ret);
     if (ret) {
         return ret;
     }
@@ -98,12 +109,14 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
 
     ret = xsk_socket__create(&xsk->socket, net->ifname, net->qid, umem->umem,
         &xsk->rx, &xsk->tx, &xsk_config);
+    NONZERO(ret);
     if (ret) {
         return ret;
     }
 
     int ifindex = if_nametoindex(net->ifname);
     ret = bpf_get_link_xdp_id(ifindex, &xdp_prog, xsk->xdp_flags);
+    NONZERO(ret);
     if (ret) {
         return ret;
     }
@@ -176,14 +189,16 @@ int main(int argc, char** argv)
     (void)argv;
 
     xsk_info xsk = {
-        .bind_flags = XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP,
+        // .bind_flags = XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP,
+        .bind_flags = 0,
+
         .libbpf_flags = 0,
         .xdp_flags = XDP_FLAGS_DRV_MODE,
     };
 
     net_info net = {
-        .ifname = "",
-        .qid = 10
+        .ifname = "veth0",
+        .qid = 1
     };
 
     umem_info* umem = umem_info_create();
