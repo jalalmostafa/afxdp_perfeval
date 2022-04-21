@@ -13,6 +13,8 @@
         "err.h": "c",
         "netdevice.h": "c",
         "if_packet.h": "c",
-        "if_ether.h": "c"
+        "if_ether.h": "c",
+        "stdlib.h": "c",
+        "unistd.h": "c"
     }
 }
