@@ -1,0 +1,14 @@
+{
+    "configurations": [
+        {
+            "name": "default",
+            "includePath": [
+                "${workspaceFolder}/xdp-tools/headers/",
+                "${workspaceFolder}/xdp-tools/lib/libbpf/src/root/usr/include",
+                "${workspaceFolder}/xdp-tools/lib/libbpf/include/uapi/linux"
+            ],
+            "cStandard": "gnu99"
+        }
+    ],
+    "version": 4
+}
