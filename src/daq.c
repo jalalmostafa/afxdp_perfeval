@@ -94,19 +94,7 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
         return EINVAL;
     }
 
-    // opt_umem_flags |= XDP_UMEM_UNALIGNED_CHUNK_FLAG;
-    // 		opt_unaligned_chunks = 1;
-    // 		opt_mmap_flags = MAP_HUGETLB;
     const struct xsk_umem_config cfg = {
-        /* We recommend that you set the fill ring size >= HW RX ring size +
-         * AF_XDP RX ring size. Make sure you fill up the fill ring
-         * with buffers at regular intervals, and you will with this setting
-         * avoid allocation failures in the driver. These are usually quite
-         * expensive since drivers have not been written to assume that
-         * allocation failures are common. For regular sockets, kernel
-         * allocated memory is used that only runs out in OOM situations
-         * that should be rare.
-         */
         .fill_size = XSK_RING_PROD__DEFAULT_NUM_DESCS * 2,
         .comp_size = XSK_RING_CONS__DEFAULT_NUM_DESCS,
         .frame_size = XSK_UMEM__DEFAULT_FRAME_SIZE,
@@ -213,7 +201,6 @@ int main(int argc, char** argv)
     xsk_info xsk = {
         // .bind_flags = XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP,
         .bind_flags = XDP_USE_NEED_WAKEUP,
-
         .libbpf_flags = 0,
         // .xdp_flags = XDP_FLAGS_DRV_MODE,
         .xdp_flags = 0

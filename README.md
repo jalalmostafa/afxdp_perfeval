@@ -29,9 +29,21 @@ Teardown the environment: `t teardown`
 
 ## Build
 
-### Ubuntu
+### Clone
+
+`git clone --recursive https://github.com/jalalmostafa/zcopy.git`
+
+### Dependencies
+
+- Ubunutu
 
 ```bash
-apt install clang llvm libelf-dev libbpf-dev libpcap-dev gcc-multilib build-essential linux-tools-common linux-tools-generic linux-headers-$(uname -r)
+apt install clang llvm libelf-dev libpcap-dev gcc-multilib build-essential linux-tools-common linux-tools-generic linux-headers-$(uname -r)
 make
+```
+
+- RHEL
+
+```
+sudo yum --enablerepo=powertools install llvm clang elfutils-libelf-devel libpcap-devel
 ```
