@@ -15,6 +15,9 @@
         "if_packet.h": "c",
         "if_ether.h": "c",
         "stdlib.h": "c",
-        "unistd.h": "c"
+        "unistd.h": "c",
+        "errno.h": "c",
+        "poll.h": "c",
+        "udp.h": "c"
     }
 }

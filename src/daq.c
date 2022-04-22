@@ -4,17 +4,20 @@
 #include <errno.h>
 #include <linux/if_ether.h>
 #include <linux/if_link.h>
+#include <linux/if_xdp.h>
 #include <net/if.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <unistd.h>
 #include <xdp/libxdp.h>
 #include <xdp/xsk.h>
 
-#define UMEM_LEN 100
+#define UMEM_LEN 1000
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
+#define UMEM_SIZE (UMEM_LEN * FRAME_SIZE)
 #define FRAME_INVALID -1
 
 typedef unsigned int queue_id;
@@ -45,7 +48,8 @@ __u32 break_flag = 0;
 static void* umem_buffer_create()
 {
     // use huge pages?
-    return calloc(1, UMEM_LEN);
+    return mmap(NULL, UMEM_SIZE, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 }
 
 static umem_info* umem_info_create()
@@ -65,11 +69,11 @@ static umem_info* umem_info_create()
 static void umem_info_free(umem_info* info)
 {
     if (info != NULL) {
-        free(info->buffer);
+        munmap(info->buffer, UMEM_SIZE);
         xsk_umem__delete(info->umem);
-        if (info->umem != NULL) {
-            free(info->umem);
-        }
+        // if (info->umem != NULL) {
+        //     free(info->umem);
+        // }
     }
 }
 
@@ -90,16 +94,34 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
         return EINVAL;
     }
 
-    printf("umem**: %p, buffer: %p, size: %d, fq: %p, cq: %p, config: %p\n", &umem->umem, umem->buffer, UMEM_LEN,
-        &umem->fill_ring, &umem->comp_ring, NULL);
-    ret = xsk_umem__create(&umem->umem, umem->buffer, UMEM_LEN,
-        &umem->fill_ring, &umem->comp_ring, NULL);
+    // opt_umem_flags |= XDP_UMEM_UNALIGNED_CHUNK_FLAG;
+    // 		opt_unaligned_chunks = 1;
+    // 		opt_mmap_flags = MAP_HUGETLB;
+    const struct xsk_umem_config cfg = {
+        /* We recommend that you set the fill ring size >= HW RX ring size +
+         * AF_XDP RX ring size. Make sure you fill up the fill ring
+         * with buffers at regular intervals, and you will with this setting
+         * avoid allocation failures in the driver. These are usually quite
+         * expensive since drivers have not been written to assume that
+         * allocation failures are common. For regular sockets, kernel
+         * allocated memory is used that only runs out in OOM situations
+         * that should be rare.
+         */
+        .fill_size = XSK_RING_PROD__DEFAULT_NUM_DESCS * 2,
+        .comp_size = XSK_RING_CONS__DEFAULT_NUM_DESCS,
+        .frame_size = XSK_UMEM__DEFAULT_FRAME_SIZE,
+        .frame_headroom = XSK_UMEM__DEFAULT_FRAME_HEADROOM,
+        .flags = 0
+    };
+
+    ret = xsk_umem__create(&umem->umem, umem->buffer, UMEM_SIZE,
+        &umem->fill_ring, &umem->comp_ring, &cfg);
     NONZERO(ret);
     if (ret) {
         return ret;
     }
 
-    struct xsk_socket_config xsk_config = {
+    const struct xsk_socket_config xsk_config = {
         .rx_size = XSK_RING_CONS__DEFAULT_NUM_DESCS,
         .tx_size = XSK_RING_PROD__DEFAULT_NUM_DESCS,
         .bind_flags = xsk->bind_flags,
@@ -190,10 +212,11 @@ int main(int argc, char** argv)
 
     xsk_info xsk = {
         // .bind_flags = XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP,
-        .bind_flags = 0,
+        .bind_flags = XDP_USE_NEED_WAKEUP,
 
         .libbpf_flags = 0,
-        .xdp_flags = XDP_FLAGS_DRV_MODE,
+        // .xdp_flags = XDP_FLAGS_DRV_MODE,
+        .xdp_flags = 0
     };
 
     net_info net = {
@@ -210,8 +233,8 @@ int main(int argc, char** argv)
 
     goto cleanup;
 error:
-    perror("Error: ");
-    printf("%d\n", ret);
+    perror("Error");
+    printf("Return Code: %d, Errno %d\n", ret, errno);
 
 cleanup:
     xsk_socket__delete(xsk.socket);

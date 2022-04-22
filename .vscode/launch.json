@@ -8,10 +8,7 @@
             "target": "./daq",
             "cwd": "${workspaceRoot}/src",
             "console": "externalTerminal",
-            "debugOptions": [
-                "RedirectOutput",
-                "Sudo"
-            ]
+            "sudo": true
         }
     ]
 }
