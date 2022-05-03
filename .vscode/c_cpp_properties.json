@@ -7,7 +7,8 @@
                 "${workspaceFolder}/xdp-tools/lib/libbpf/src/root/usr/include",
                 "${workspaceFolder}/xdp-tools/lib/libbpf/include/uapi/linux"
             ],
-            "cStandard": "gnu99"
+            "cStandard": "gnu99",
+            "configurationProvider": "ms-vscode.makefile-tools"
         }
     ],
     "version": 4

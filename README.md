@@ -13,7 +13,7 @@ random name will be generated for you.
 
 Examples:
 
-Setup new environment named "test": `./testenv.sh setup --name=test`
+Setup new environment named "test": `./testenv.sh setup --legacy-ip --name=test`
 
 Create a shell alias for easy use of script from anywhere: `eval $(./testenv.sh alias)`
 
@@ -44,6 +44,6 @@ make
 
 - RHEL
 
-```
+```bash
 sudo yum --enablerepo=powertools install llvm clang elfutils-libelf-devel libpcap-devel
 ```

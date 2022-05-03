@@ -7,8 +7,6 @@
             "request": "launch",
             "target": "./daq",
             "cwd": "${workspaceRoot}/src",
-            "console": "externalTerminal",
-            "sudo": true
         }
     ]
 }

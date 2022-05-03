@@ -7,10 +7,12 @@
 #include <linux/if_xdp.h>
 #include <net/if.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/signal.h>
 #include <unistd.h>
 #include <xdp/libxdp.h>
 #include <xdp/xsk.h>
@@ -19,6 +21,7 @@
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 #define UMEM_SIZE (UMEM_LEN * FRAME_SIZE)
 #define FRAME_INVALID -1
+#define NETIF "xdptut-2d45"
 
 typedef unsigned int queue_id;
 
@@ -32,6 +35,7 @@ typedef struct {
 typedef struct {
     char* ifname;
     queue_id qid;
+    __u32 ifindex;
 } net_info;
 
 typedef struct {
@@ -71,19 +75,8 @@ static void umem_info_free(umem_info* info)
     if (info != NULL) {
         munmap(info->buffer, UMEM_SIZE);
         xsk_umem__delete(info->umem);
-        // if (info->umem != NULL) {
-        //     free(info->umem);
-        // }
     }
 }
-
-#define NONZERO(x)                         \
-    do {                                   \
-        if (x) {                           \
-            printf("Line %d\n", __LINE__); \
-            return x;                      \
-        }                                  \
-    } while (0)
 
 static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
 {
@@ -104,7 +97,6 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
 
     ret = xsk_umem__create(&umem->umem, umem->buffer, UMEM_SIZE,
         &umem->fill_ring, &umem->comp_ring, &cfg);
-    NONZERO(ret);
     if (ret) {
         return ret;
     }
@@ -119,19 +111,18 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
 
     ret = xsk_socket__create(&xsk->socket, net->ifname, net->qid, umem->umem,
         &xsk->rx, &xsk->tx, &xsk_config);
-    NONZERO(ret);
     if (ret) {
         return ret;
     }
 
-    int ifindex = if_nametoindex(net->ifname);
-    ret = bpf_get_link_xdp_id(ifindex, &xdp_prog, xsk->xdp_flags);
-    NONZERO(ret);
+    ret = bpf_get_link_xdp_id(net->ifindex, &xdp_prog, xsk->xdp_flags);
+    struct xdp_program* program = xdp_program__from_id(xdp_prog);
+    enum xdp_attach_mode mode = xdp_program__is_attached(program, net->ifindex);
     if (ret) {
         return ret;
     }
 
-    printf("XDP Program ID: %d\n", xdp_prog);
+    printf("XDP Program ID: %d Mode: %d\n", xdp_prog, mode);
 
     // push all frames to fill ring
     __u32 idx;
@@ -154,7 +145,7 @@ int process_packet(xsk_info* xsk, umem_info* umem, const struct xdp_desc* desc)
 {
     (void)xsk;
     struct ethhdr* frame = (struct ethhdr*)xsk_umem__get_data(umem->buffer, desc->addr);
-    printf("[SRC MAC] %s - [DST MAC] %s\n", frame->h_source, frame->h_dest);
+    printf("[SRC MAC] %s - [DST MAC] %s - [PROTO] %d\n", frame->h_source, frame->h_dest, frame->h_proto);
     return 0;
 }
 
@@ -174,9 +165,16 @@ void do_rx(xsk_info* xsk, umem_info* umem)
     xsk_ring_cons__release(&xsk->rx, recvd);
 }
 
-void process_rx(xsk_info* xsk, umem_info* umem)
+struct rx_ctx {
+    xsk_info* xsk;
+    umem_info* umem;
+};
+
+void* process_rx(void* rxctx_ptr)
 {
-    struct pollfd fds[2];
+    xsk_info* xsk = ((struct rx_ctx*)rxctx_ptr)->xsk;
+    umem_info* umem = ((struct rx_ctx*)rxctx_ptr)->umem;
+    struct pollfd fds[1];
     memset(fds, 0, sizeof(fds));
 
     fds[0].fd = xsk_socket__fd(xsk->socket);
@@ -190,33 +188,89 @@ void process_rx(xsk_info* xsk, umem_info* umem)
         } else {
             do_rx(xsk, umem);
         }
+
+        if (fds[0].revents != 0)
+            printf("fds[0].revents=%d\n", fds[0].revents);
     }
+
+    return NULL;
+}
+
+void signal_handler(int sig)
+{
+    printf("signal: %d\n", sig);
+    switch (sig) {
+    case SIGINT:
+    case SIGTERM:
+    case SIGABRT:
+        break_flag = 1;
+        break;
+    default:
+        break;
+    }
+}
+
+int infoprint(enum libbpf_print_level level,
+    const char* format, va_list ap)
+{
+    (void)level;
+    return vfprintf(stderr, format, ap);
 }
 
 int main(int argc, char** argv)
 {
     (void)argc;
     (void)argv;
+    int ifindex = if_nametoindex(NETIF), ret;
+    enum xdp_attach_mode mode = XDP_MODE_NATIVE;
+    int loaded = 0;
 
-    xsk_info xsk = {
-        // .bind_flags = XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP,
-        .bind_flags = XDP_USE_NEED_WAKEUP,
-        .libbpf_flags = 0,
-        // .xdp_flags = XDP_FLAGS_DRV_MODE,
-        .xdp_flags = 0
-    };
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGABRT, signal_handler);
+    libbpf_set_print(infoprint);
+
+    printf("xdp_program__open_file errno: %d\n", errno);
+    struct xdp_program* kern_prog = xdp_program__open_file("/home/jalal/ebpf-daq/src/daq.bpf.o", NULL, NULL);
+    printf("xdp_program__open_file errno: %d, %p\n", errno, kern_prog);
+
+    printf("xdp_program__attach errno: %d\n", errno);
+    ret = loaded = xdp_program__attach(kern_prog, ifindex, mode, 0);
+    printf("xdp_program__attach ret %d errno: %d\n", ret, errno);
+    if (ret) {
+        goto error;
+    }
+
+    xsk_info* xsk = (xsk_info*)calloc(1, sizeof(xsk_info));
+    xsk->bind_flags = XDP_USE_NEED_WAKEUP;
+    xsk->libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
+    // xsk->xdp_flags = XDP_FLAGS_DRV_MODE;
 
     net_info net = {
-        .ifname = "veth0",
-        .qid = 1
+        .ifname = NETIF,
+        .qid = 0,
+        .ifindex = ifindex
     };
 
     umem_info* umem = umem_info_create();
-    int ret = xsk_configure(&xsk, &net, umem);
+    ret = xsk_configure(xsk, &net, umem);
 
     if (ret) {
         goto error;
     }
+
+    struct bpf_object* obj = xdp_program__bpf_obj(kern_prog);
+    int mapfd = bpf_object__find_map_fd_by_name(obj, "xsks_maps");
+    printf("mapfd: %d\n", mapfd);
+    if (mapfd) {
+        int fd = xsk_socket__fd(xsk->socket);
+        ret = bpf_map_update_elem(mapfd, &ifindex, &fd, 0);
+    }
+
+    struct rx_ctx ctx = { .umem = umem, .xsk = xsk };
+    pthread_t poller;
+    pthread_create(&poller, NULL, process_rx, (void*)&ctx);
+    pthread_join(poller, NULL);
 
     goto cleanup;
 error:
@@ -224,6 +278,14 @@ error:
     printf("Return Code: %d, Errno %d\n", ret, errno);
 
 cleanup:
-    xsk_socket__delete(xsk.socket);
-    umem_info_free(umem);
+    xdp_program__detach(kern_prog, ifindex, mode, 0);
+    xdp_program__close(kern_prog);
+    if (xsk != NULL) {
+        xsk_socket__delete(xsk->socket);
+        free(xsk);
+    }
+
+    if (umem != NULL) {
+        umem_info_free(umem);
+    }
 }

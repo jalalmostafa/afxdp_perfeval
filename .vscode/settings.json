@@ -18,6 +18,10 @@
         "unistd.h": "c",
         "errno.h": "c",
         "poll.h": "c",
-        "udp.h": "c"
+        "udp.h": "c",
+        "libbpf.h": "c",
+        "error_t.h": "c",
+        "signal.h": "c",
+        "if_xdp.h": "c"
     }
 }
