@@ -22,6 +22,12 @@
         "libbpf.h": "c",
         "error_t.h": "c",
         "signal.h": "c",
-        "if_xdp.h": "c"
+        "if_xdp.h": "c",
+        "xdpsock.h": "c",
+        "xdp_helpers.h": "c",
+        "bpf_helpers.h": "c",
+        "ethernet.h": "c",
+        "ip_icmp.h": "c",
+        "ip.h": "c"
     }
 }
