@@ -320,16 +320,21 @@ __u8* process_frame(__u8* buffer, __u32 len)
     }
 
     struct iphdr* packet = (struct iphdr*)(frame + 1);
-    if (packet->version != 4 && packet->protocol != IPPROTO_ICMP) {
+    if (packet->version != 4) {
         return NULL;
     }
 
-    struct icmphdr* icmp = (struct icmphdr*)(packet + 1);
-    if (icmp->type != ICMP_ECHO) {
+    switch (packet->protocol) {
+    case IPPROTO_ICMP:
+        struct icmphdr* icmp = (struct icmphdr*)(packet + 1);
+        if (icmp->type != ICMP_ECHO) {
+            return NULL;
+        }
+
+        return construct_pong(frame, len);
+    default:
         return NULL;
     }
-
-    return construct_pong(frame, len);
 }
 
 #define BATCH_SIZE 1000
