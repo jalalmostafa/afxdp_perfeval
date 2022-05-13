@@ -1,5 +1,5 @@
 TOOL_NAME    := daq
-XDP_TARGETS  := daq.bpf
+XDP_TARGETS  := bpf/xsk.bpf
 USER_TARGETS := daq
 TEST_FILE    := 
 

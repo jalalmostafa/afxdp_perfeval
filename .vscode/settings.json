@@ -3,31 +3,7 @@
     "files.associations": {
         "*.props": "xml",
         "*.targets": "xml",
-        "if_link.h": "c",
-        "if.h": "c",
-        "stdio.h": "c",
-        "resource.h": "c",
-        "bpf.h": "c",
-        "libxdp.h": "c",
-        "xsk.h": "c",
-        "err.h": "c",
-        "netdevice.h": "c",
-        "if_packet.h": "c",
-        "if_ether.h": "c",
-        "stdlib.h": "c",
-        "unistd.h": "c",
-        "errno.h": "c",
-        "poll.h": "c",
-        "udp.h": "c",
-        "libbpf.h": "c",
-        "error_t.h": "c",
-        "signal.h": "c",
-        "if_xdp.h": "c",
-        "xdpsock.h": "c",
-        "xdp_helpers.h": "c",
-        "bpf_helpers.h": "c",
-        "ethernet.h": "c",
-        "ip_icmp.h": "c",
-        "ip.h": "c"
+        "*.h": "c",
+        "*.c": "c"
     }
 }

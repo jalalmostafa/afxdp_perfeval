@@ -488,7 +488,7 @@ int main(int argc, char** argv)
         exit(EXIT_FAILURE);
     }
 
-    struct xdp_program* kern_prog = xdp_program__open_file("/home/jalal/ebpf-daq/src/daq.bpf.o", NULL, NULL);
+    struct xdp_program* kern_prog = xdp_program__open_file("./bpf/xsk.bpf.o", NULL, NULL);
 
     ret = xdp_program__attach(kern_prog, ifindex, mode, 0);
     if (ret) {

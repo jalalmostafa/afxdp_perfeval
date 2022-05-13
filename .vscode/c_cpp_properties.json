@@ -5,9 +5,11 @@
             "includePath": [
                 "${workspaceFolder}/xdp-tools/headers/",
                 "${workspaceFolder}/xdp-tools/lib/libbpf/src/root/usr/include",
-                "${workspaceFolder}/xdp-tools/lib/libbpf/include/uapi/linux"
+                "${workspaceFolder}/xdp-tools/lib/libbpf/include/uapi/linux",
+                "${workspaceFolder}/src",
+                "${workspaceFolder}/include"
             ],
-            "cStandard": "gnu99",
+            "cStandard": "gnu11",
             "configurationProvider": "ms-vscode.makefile-tools"
         }
     ],
