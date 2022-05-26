@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+
 #include <arpa/inet.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
-#include <linux/icmp.h>
-#include <linux/if_ether.h>
-#include <linux/if_xdp.h>
-#include <linux/ip.h>
 #include <math.h>
+#include <net/ethernet.h>
 #include <net/if.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -19,6 +19,8 @@
 #include <unistd.h>
 #include <xdp/libxdp.h>
 #include <xdp/xsk.h>
+
+#include "tcpip/inet_csum.h"
 
 #define UMEM_LEN 1000
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
@@ -158,90 +160,6 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
     return 0;
 }
 
-/*
- * This function code has been taken from
- * Linux kernel lib/checksum.c
- */
-static inline unsigned short from32to16(unsigned int x)
-{
-    /* add up 16-bit and 16-bit for 16+c bit */
-    x = (x & 0xffff) + (x >> 16);
-    /* add up carry.. */
-    x = (x & 0xffff) + (x >> 16);
-    return x;
-}
-
-/*
- * This function code has been taken from
- * Linux kernel lib/checksum.c
- */
-static unsigned int inet_csum(const unsigned char* buff, int len)
-{
-    unsigned int result = 0;
-    int odd;
-
-    if (len <= 0)
-        goto out;
-    odd = 1 & (unsigned long)buff;
-    if (odd) {
-#ifdef __LITTLE_ENDIAN
-        result += (*buff << 8);
-#else
-        result = *buff;
-#endif
-        len--;
-        buff++;
-    }
-    if (len >= 2) {
-        if (2 & (unsigned long)buff) {
-            result += *(unsigned short*)buff;
-            len -= 2;
-            buff += 2;
-        }
-        if (len >= 4) {
-            const unsigned char* end = buff + ((unsigned int)len & ~3);
-            unsigned int carry = 0;
-
-            do {
-                unsigned int w = *(unsigned int*)buff;
-
-                buff += 4;
-                result += carry;
-                result += w;
-                carry = (w > result);
-            } while (buff < end);
-            result += carry;
-            result = (result & 0xffff) + (result >> 16);
-        }
-        if (len & 2) {
-            result += *(unsigned short*)buff;
-            buff += 2;
-        }
-    }
-    if (len & 1)
-#ifdef __LITTLE_ENDIAN
-        result += *buff;
-#else
-        result += (*buff << 8);
-#endif
-    result = from32to16(result);
-    if (odd)
-        result = ((result >> 8) & 0xff) | ((result & 0xff) << 8);
-out:
-    return result;
-}
-
-/*
- *	This is a version of ip_compute_csum() optimized for IP headers,
- *	which always checksum on 4 octet boundaries.
- *	This function code has been taken from
- *	Linux kernel lib/checksum.c
- */
-static inline __sum16 ip_fast_csum(const void* iph, unsigned int ihl)
-{
-    return (__sum16)~inet_csum(iph, ihl * 4);
-}
-
 void log_pingpong(struct iphdr* packet)
 {
     __u32 saddr = ntohl(packet->saddr);
@@ -260,12 +178,12 @@ void log_frame(struct ethhdr* frame)
         frame->h_dest[0], frame->h_dest[1], frame->h_dest[2], frame->h_dest[3], frame->h_dest[4], frame->h_dest[5], ethertype);
 }
 
-static __u8 pong_reply[FRAME_SIZE];
-
 struct reply {
     struct icmphdr hdr;
     __u8 buffer[56];
 };
+
+static __u8 pong_reply[FRAME_SIZE];
 
 __u8* construct_pong(struct ethhdr* frame, __u32 len)
 {
@@ -349,7 +267,7 @@ void log_icmp(__u8* frame)
 
 int xdp_pingpong(xsk_info* xsk, umem_info* umem)
 {
-    __u32 idx_rx, idx_tx, idx_fq, idx_cq;
+    __u32 idx_rx = 0, idx_tx = 0, idx_fq = 0, idx_cq = 0;
 
     int recvd = xsk_ring_cons__peek(&xsk->rx, BATCH_SIZE, &idx_rx);
     if (!recvd) {
@@ -469,7 +387,7 @@ int infoprint(enum libbpf_print_level level,
     return vfprintf(stderr, format, ap);
 }
 
-int main(int argc, char** argv)
+int test(int argc, char** argv)
 {
     (void)argc;
     (void)argv;
@@ -491,6 +409,7 @@ int main(int argc, char** argv)
     struct xdp_program* kern_prog = xdp_program__open_file("./bpf/xsk.bpf.o", NULL, NULL);
 
     ret = xdp_program__attach(kern_prog, ifindex, mode, 0);
+    printf("ret: %d\n", ret);
     if (ret) {
         goto error;
     }
@@ -539,4 +458,6 @@ cleanup:
     if (umem != NULL) {
         umem_info_free(umem);
     }
+
+    return 0;
 }
