@@ -20,6 +20,8 @@
 #include <xdp/libxdp.h>
 #include <xdp/xsk.h>
 
+#include "dqdk.h"
+
 #define UMEM_LEN 1000
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 #define UMEM_SIZE (UMEM_LEN * FRAME_SIZE)
@@ -43,16 +45,17 @@ typedef struct {
 typedef struct {
     char* ifname;
     queue_id qid;
-    __u32 ifindex;
+    u32 ifindex;
 } net_info;
 
 typedef struct {
     struct xsk_socket* socket;
     struct xsk_ring_prod tx;
     struct xsk_ring_cons rx;
-    __u32 libbpf_flags;
-    __u32 xdp_flags;
-    __u16 bind_flags;
+    u32 libbpf_flags;
+    u32 xdp_flags;
+    u16 bind_flags;
+    u32 batch_size;
 } xsk_info;
 
 __u32 break_flag = 0;
@@ -86,19 +89,10 @@ static void umem_info_free(umem_info* info)
     }
 }
 
-/*
-    UMEM Flags
-    Unaligned Memory CHUNK: XDP_UMEM_UNALIGNED_CHUNK_FLAG (Use HUGE Pages - mmap MAP_HUGETLB - and custom memory allocator)
-
-    bind flags:
-    XDP_USE_NEED_WAKEUP
-
-
- */
 static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
 {
     int ret = 0;
-    __u32 xdp_prog = -1;
+    u32 xdp_prog = -1;
 
     if (umem == NULL) {
         return EINVAL;
@@ -119,7 +113,7 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
     }
 
     // push all frames to fill ring
-    __u32 idx;
+    u32 idx;
     ret = xsk_ring_prod__reserve(&umem->fill_ring, FILLQ_LEN, &idx);
     if (ret != FILLQ_LEN) {
         return EIO;
@@ -260,18 +254,18 @@ void log_frame(struct ethhdr* frame)
         frame->h_dest[0], frame->h_dest[1], frame->h_dest[2], frame->h_dest[3], frame->h_dest[4], frame->h_dest[5], ethertype);
 }
 
-static __u8 pong_reply[FRAME_SIZE];
-
 struct reply {
     struct icmphdr hdr;
-    __u8 buffer[56];
+    u8 buffer[56];
 };
 
-__u8* construct_pong(struct ethhdr* frame, __u32 len)
+u8 pong_reply[FRAME_SIZE];
+
+u8* construct_pong(struct ethhdr* frame, u32 len)
 {
     struct iphdr* packet = (struct iphdr*)(frame + 1);
     struct icmphdr* icmp = (struct icmphdr*)(packet + 1);
-    __u8* data = (__u8*)(icmp + 1);
+    u8* data = (u8*)(icmp + 1);
 
     int datalen = len - sizeof(struct ethhdr) - sizeof(struct iphdr) - sizeof(struct icmphdr);
 
@@ -337,8 +331,6 @@ __u8* process_frame(__u8* buffer, __u32 len)
     }
 }
 
-#define BATCH_SIZE 1000
-
 void log_icmp(__u8* frame)
 {
     struct ethhdr* framehdr = (struct ethhdr*)frame;
@@ -349,9 +341,9 @@ void log_icmp(__u8* frame)
 
 int xdp_pingpong(xsk_info* xsk, umem_info* umem)
 {
-    __u32 idx_rx, idx_tx, idx_fq, idx_cq;
+    u32 idx_rx, idx_tx, idx_fq, idx_cq;
 
-    int recvd = xsk_ring_cons__peek(&xsk->rx, BATCH_SIZE, &idx_rx);
+    int recvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
     if (!recvd) {
         return ECOMM;
     }
@@ -369,7 +361,7 @@ int xdp_pingpong(xsk_info* xsk, umem_info* umem)
     //     ret = xsk_ring_prod__reserve(&umem->fill_ring, recvd, &idx_fq);
     // }
 
-    ret = xsk_ring_cons__peek(&umem->comp_ring, BATCH_SIZE, &idx_cq);
+    ret = xsk_ring_cons__peek(&umem->comp_ring, xsk->batch_size, &idx_cq);
     if (ret > 0) {
         xsk_ring_cons__release(&umem->comp_ring, recvd);
         for (int i = 0; i < ret; i++)
@@ -381,14 +373,6 @@ int xdp_pingpong(xsk_info* xsk, umem_info* umem)
     if (ret < 0) {
         return -ret;
     }
-
-    // while (ret != recvd) {
-    //     if (ret < 0) {
-    //         return -ret;
-    //     }
-    //     // TODO: empty completion ring!!!
-    //     ret = xsk_ring_prod__reserve(&xsk->tx, recvd, &idx_tx);
-    // }
 
     for (int i = 0; i < recvd; i++) {
         __u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
@@ -471,16 +455,69 @@ int infoprint(enum libbpf_print_level level,
 
 int main(int argc, char** argv)
 {
-    (void)argc;
-    (void)argv;
-    int ifindex = if_nametoindex(NETIF), ret;
-    enum xdp_attach_mode mode = XDP_MODE;
+    int ifindex, ret, opt;
+    char* opt_ifname = NULL;
+    enum xdp_attach_mode opt_mode = XDP_MODE_NATIVE;
+    u32 opt_queueid = -1, opt_batchsize = 64;
+    u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1;
+    // opt_udpmode = 0;
+    //  u32 zero_copy_working = 0;
+
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     signal(SIGABRT, signal_handler);
-    libbpf_set_print(infoprint);
+
+    while ((opt = getopt(argc, argv, "cb:i:q:m:vwu")) != -1) {
+        switch (opt) {
+        case 'i':
+            opt_ifname = optarg;
+            ifindex = if_nametoindex(opt_ifname);
+            break;
+        case 'q':
+            opt_queueid = atoi(optarg);
+            break;
+        case 'm':
+            char* marg = optarg;
+            if (strcmp("native", marg) == 0) {
+                opt_mode = XDP_MODE_NATIVE;
+            } else if (strcmp("generic", marg) == 0) {
+                opt_mode = XDP_MODE_SKB;
+            } else {
+                dlog_error("Invalid XDP Mode");
+                exit(EXIT_FAILURE);
+            }
+            break;
+        case 'c':
+            opt_zcopy = 0;
+            break;
+        case 'v':
+            opt_verbose = 1;
+            break;
+        case 'b':
+            opt_batchsize = atoi(optarg);
+            break;
+        case 'w':
+            opt_needs_wakeup = 1;
+            break;
+        // case 'u':
+        //     opt_udpmode = 1;
+        //     break;
+        default:
+            dlog_error("Invalid Arg\n");
+            exit(EXIT_SUCCESS);
+        }
+    }
+
+    if (opt_zcopy && opt_mode == XDP_MODE_SKB) {
+        dlog_info("Turning off zero-copy for XDP generic mode");
+        opt_zcopy = 0;
+    }
+
+    if (opt_verbose) {
+        libbpf_set_print(infoprint);
+    }
 
     if (setrlimit(RLIMIT_MEMLOCK, &rlim)) {
         fprintf(stderr, "ERROR: setrlimit(RLIMIT_MEMLOCK) \"%s\"\n",
@@ -490,19 +527,25 @@ int main(int argc, char** argv)
 
     struct xdp_program* kern_prog = xdp_program__open_file("./bpf/xsk.bpf.o", NULL, NULL);
 
-    ret = xdp_program__attach(kern_prog, ifindex, mode, 0);
+    ret = xdp_program__attach(kern_prog, ifindex, opt_mode, 0);
     if (ret) {
         goto error;
     }
 
     xsk_info* xsk = (xsk_info*)calloc(1, sizeof(xsk_info));
+    xsk->batch_size = opt_batchsize;
     xsk->libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
+    xsk->bind_flags |= (opt_zcopy ? XDP_ZEROCOPY : XDP_COPY);
+
+    if (opt_needs_wakeup) {
+        xsk->bind_flags |= XDP_USE_NEED_WAKEUP;
+    }
+
     xsk->xdp_flags = 0;
-    xsk->bind_flags = 0;
 
     net_info net = {
-        .ifname = NETIF,
-        .qid = QUEUE_ID,
+        .ifname = opt_ifname,
+        .qid = opt_queueid,
         .ifindex = ifindex
     };
 
@@ -529,7 +572,7 @@ error:
     printf("Return Code: %d, Errno %d\n", ret, errno);
 
 cleanup:
-    xdp_program__detach(kern_prog, ifindex, mode, 0);
+    xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
     xdp_program__close(kern_prog);
     if (xsk != NULL) {
         xsk_socket__delete(xsk->socket);

@@ -1,4 +1,3 @@
-
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
@@ -17,7 +16,7 @@ struct {
 } xsks_map SEC(".maps");
 
 struct {
-    __uint(priority, 10);
+    __uint(priority, 1);
     __uint(XDP_PASS, 1);
 } XDP_RUN_CONFIG(acquire);
 
@@ -26,7 +25,9 @@ int acquire(struct xdp_md* ctx)
 {
     __u32 rx_idx = ctx->rx_queue_index;
     __u32* exists = (__u32*)bpf_map_lookup_elem(&xsks_map, &rx_idx);
-    bpf_printk("***** ACQUIRE ******* RX Queue ID: %d Exists %p - %d\n", rx_idx, exists, exists != NULL ? *exists : -1);
+
+    bpf_printk("***** ACQUIRE ******* RX Queue ID: %d Exists %p - %d\n",
+        rx_idx, exists, exists != NULL ? *exists : -1);
 
     if (exists) {
         long ret = bpf_redirect_map(&xsks_map, rx_idx, XDP_DROP);
