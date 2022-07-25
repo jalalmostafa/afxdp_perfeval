@@ -6,7 +6,7 @@
 #include <linux/icmp.h>
 #include <linux/if_ether.h>
 #include <linux/if_xdp.h>
-#include <linux/ip.h>
+#include <netinet/udp.h>
 #include <math.h>
 #include <net/if.h>
 #include <poll.h>
@@ -21,6 +21,8 @@
 #include <xdp/xsk.h>
 
 #include "dqdk.h"
+#include "tcpip/ipv4.h"
+#include "tcpip/udp.h"
 
 #define UMEM_LEN 1000
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
@@ -34,6 +36,15 @@
 #define QUEUE_ID 0
 
 typedef unsigned int queue_id;
+
+struct xsk_stat {
+    u64 rcvd_pkts;
+    u64 rcvd_udps;
+    u64 fill_fail_polls;
+    u64 invalid_ip_pkts;
+    u64 invalid_udp_pkts;
+    u64 runtime;
+};
 
 typedef struct {
     struct xsk_umem* umem;
@@ -152,90 +163,6 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
     return 0;
 }
 
-/*
- * This function code has been taken from
- * Linux kernel lib/checksum.c
- */
-static inline unsigned short from32to16(unsigned int x)
-{
-    /* add up 16-bit and 16-bit for 16+c bit */
-    x = (x & 0xffff) + (x >> 16);
-    /* add up carry.. */
-    x = (x & 0xffff) + (x >> 16);
-    return x;
-}
-
-/*
- * This function code has been taken from
- * Linux kernel lib/checksum.c
- */
-static unsigned int inet_csum(const unsigned char* buff, int len)
-{
-    unsigned int result = 0;
-    int odd;
-
-    if (len <= 0)
-        goto out;
-    odd = 1 & (unsigned long)buff;
-    if (odd) {
-#ifdef __LITTLE_ENDIAN
-        result += (*buff << 8);
-#else
-        result = *buff;
-#endif
-        len--;
-        buff++;
-    }
-    if (len >= 2) {
-        if (2 & (unsigned long)buff) {
-            result += *(unsigned short*)buff;
-            len -= 2;
-            buff += 2;
-        }
-        if (len >= 4) {
-            const unsigned char* end = buff + ((unsigned int)len & ~3);
-            unsigned int carry = 0;
-
-            do {
-                unsigned int w = *(unsigned int*)buff;
-
-                buff += 4;
-                result += carry;
-                result += w;
-                carry = (w > result);
-            } while (buff < end);
-            result += carry;
-            result = (result & 0xffff) + (result >> 16);
-        }
-        if (len & 2) {
-            result += *(unsigned short*)buff;
-            buff += 2;
-        }
-    }
-    if (len & 1)
-#ifdef __LITTLE_ENDIAN
-        result += *buff;
-#else
-        result += (*buff << 8);
-#endif
-    result = from32to16(result);
-    if (odd)
-        result = ((result >> 8) & 0xff) | ((result & 0xff) << 8);
-out:
-    return result;
-}
-
-/*
- *	This is a version of ip_compute_csum() optimized for IP headers,
- *	which always checksum on 4 octet boundaries.
- *	This function code has been taken from
- *	Linux kernel lib/checksum.c
- */
-static inline __sum16 ip_fast_csum(const void* iph, unsigned int ihl)
-{
-    return (__sum16)~inet_csum(iph, ihl * 4);
-}
-
 void log_pingpong(struct iphdr* packet)
 {
     __u32 saddr = ntohl(packet->saddr);
@@ -303,9 +230,18 @@ u8* construct_pong(struct ethhdr* frame, u32 len)
     return pong_reply;
 }
 
-__u8* process_frame(__u8* buffer, __u32 len)
+void log_icmp(u8* frame)
 {
-    (void)len;
+    struct ethhdr* framehdr = (struct ethhdr*)frame;
+    struct iphdr* packet = (struct iphdr*)(((struct ethhdr*)framehdr) + 1);
+    log_frame(framehdr);
+    log_pingpong(packet);
+}
+
+always_inline u8* process_frame(u8* buffer, u32 len)
+{
+    // FIXME: stats
+
     struct ethhdr* frame = (struct ethhdr*)buffer;
     int ethertype = ntohs(frame->h_proto);
 
@@ -313,30 +249,43 @@ __u8* process_frame(__u8* buffer, __u32 len)
         return NULL;
     }
 
+    // FIXME: xsk->stats.rcvd_pkts += 1;
+
     struct iphdr* packet = (struct iphdr*)(frame + 1);
     if (packet->version != 4) {
         return NULL;
     }
 
+    if (!ip4_audit(packet, len - sizeof(struct ethhdr))) {
+        // FIXME: xsk->stats.invalid_ip_pkts++;
+        return NULL;
+    }
+
     switch (packet->protocol) {
     case IPPROTO_ICMP:
+        log_icmp(buffer);
         struct icmphdr* icmp = (struct icmphdr*)(packet + 1);
         if (icmp->type != ICMP_ECHO) {
             return NULL;
         }
 
-        return construct_pong(frame, len);
+        u8* pong = construct_pong(frame, len);
+        log_icmp(pong);
+
+        return pong;
+    case IPPROTO_UDP:
+        struct udphdr* udp = (struct udphdr*)(((u8*)packet) + ip4_get_header_size(packet));
+        u32 udplen = ntohs(packet->tot_len) - ip4_get_header_size(packet);
+        if (!udp_audit(udp, packet->saddr, packet->daddr, udplen)) {
+            // FIXME: xsk->stats.invalid_udp_pkts++;
+            return NULL;
+        }
+        return (u8*)(udp + 1);
+    case IPPROTO_RAW:
+        return ((u8*)packet) + ip4_get_header_size(packet);
     default:
         return NULL;
     }
-}
-
-void log_icmp(__u8* frame)
-{
-    struct ethhdr* framehdr = (struct ethhdr*)frame;
-    struct iphdr* packet = (struct iphdr*)(((struct ethhdr*)framehdr) + 1);
-    log_frame(framehdr);
-    log_pingpong(packet);
 }
 
 int xdp_pingpong(xsk_info* xsk, umem_info* umem)
@@ -349,17 +298,14 @@ int xdp_pingpong(xsk_info* xsk, umem_info* umem)
     }
 
     int ret = xsk_ring_prod__reserve(&umem->fill_ring, recvd, &idx_fq);
-    if (ret < 0) {
-        return -ret;
+
+    while (ret != recvd) {
+        if (ret < 0) {
+            return -ret;
+        }
+
+        ret = xsk_ring_prod__reserve(&umem->fill_ring, recvd, &idx_fq);
     }
-
-    // while (ret != recvd) {
-    //     if (ret < 0) {
-    //         return -ret;
-    //     }
-
-    //     ret = xsk_ring_prod__reserve(&umem->fill_ring, recvd, &idx_fq);
-    // }
 
     ret = xsk_ring_cons__peek(&umem->comp_ring, xsk->batch_size, &idx_cq);
     if (ret > 0) {
@@ -375,21 +321,18 @@ int xdp_pingpong(xsk_info* xsk, umem_info* umem)
     }
 
     for (int i = 0; i < recvd; i++) {
-        __u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
-        __u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
-        __u64 orig = xsk_umem__extract_addr(addr);
+        u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
+        u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
+        u64 orig = xsk_umem__extract_addr(addr);
 
         addr = xsk_umem__add_offset_to_addr(addr);
 
-        __u8* frame = xsk_umem__get_data(umem->buffer, addr);
+        u8* frame = xsk_umem__get_data(umem->buffer, addr);
 
-        log_icmp(frame);
-
-        __u8* pong = process_frame(frame, len);
+        u8* pong = process_frame(frame, len);
 
         if (pong != NULL) {
             memcpy(frame, pong, FRAME_SIZE);
-            log_icmp(pong);
 
             xsk_ring_prod__tx_desc(&xsk->tx, idx_tx)->addr = orig;
             xsk_ring_prod__tx_desc(&xsk->tx, idx_tx)->len = len;
@@ -404,28 +347,85 @@ int xdp_pingpong(xsk_info* xsk, umem_info* umem)
     return 0;
 }
 
+always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
+{
+    u32 idx_rx, idx_fq;
+
+    int rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
+    if (!rcvd) {
+        return ECOMM;
+    }
+
+    int ret = xsk_ring_prod__reserve(&umem->fill_ring, rcvd, &idx_fq);
+
+    while (ret != rcvd) {
+        if (ret < 0) {
+            return -ret;
+        }
+
+        ret = xsk_ring_prod__reserve(&umem->fill_ring, rcvd, &idx_fq);
+    }
+
+    for (int i = 0; i < rcvd; i++) {
+        u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
+        u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
+        // u64 orig = xsk_umem__extract_addr(addr);
+
+        addr = xsk_umem__add_offset_to_addr(addr);
+
+        u8* frame = xsk_umem__get_data(umem->buffer, addr);
+
+        u8* data = process_frame(frame, len);
+
+        if (data != NULL) {
+            // touch the data!
+            data[0] = 1;
+        } else {
+            printf("data\n");
+        }
+        idx_rx++;
+        idx_fq++;
+    }
+
+    xsk_ring_cons__release(&xsk->rx, rcvd);
+    xsk_ring_prod__submit(&umem->fill_ring, rcvd);
+    return 0;
+}
+
 struct rx_ctx {
     xsk_info* xsk;
     umem_info* umem;
+    int poll_timeout;
+    int bench_mode;
 };
 
 void* poll_rx(void* rxctx_ptr)
 {
-    xsk_info* xsk = ((struct rx_ctx*)rxctx_ptr)->xsk;
-    umem_info* umem = ((struct rx_ctx*)rxctx_ptr)->umem;
+    struct rx_ctx* ctx = (struct rx_ctx*)rxctx_ptr;
+    xsk_info* xsk = ctx->xsk;
+    umem_info* umem = ctx->umem;
     struct pollfd fds[1];
     memset(fds, 0, sizeof(fds));
 
     fds[0].fd = xsk_socket__fd(xsk->socket);
     fds[0].events = POLLIN;
     while (!break_flag) {
-        int ret = poll(fds, 1, 1000);
+        int ret = poll(fds, 1, ctx->poll_timeout);
         if (ret < 0) {
             printf("[Poll-%d] %s\n", __LINE__, strerror(errno));
         } else if (ret == 0) {
             printf("[Poll] Timeout\n");
         } else if (fds[0].revents == POLLIN) {
-            xdp_pingpong(xsk, umem);
+            switch (ctx->bench_mode) {
+            case IPPROTO_RAW:
+            case IPPROTO_UDP:
+                xdp_udpip(xsk, umem);
+                break;
+            case IPPROTO_ICMP:
+            default:
+                xdp_pingpong(xsk, umem);
+                break;
+            }
         }
     }
 
@@ -459,8 +459,8 @@ int main(int argc, char** argv)
     char* opt_ifname = NULL;
     enum xdp_attach_mode opt_mode = XDP_MODE_NATIVE;
     u32 opt_queueid = -1, opt_batchsize = 64;
-    u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1;
-    // opt_udpmode = 0;
+    u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1, opt_transportmode = IPPROTO_ICMP;
+    int opt_polltimeout = 1000;
     //  u32 zero_copy_working = 0;
 
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
@@ -469,7 +469,7 @@ int main(int argc, char** argv)
     signal(SIGTERM, signal_handler);
     signal(SIGABRT, signal_handler);
 
-    while ((opt = getopt(argc, argv, "cb:i:q:m:vwu")) != -1) {
+    while ((opt = getopt(argc, argv, "cb:i:q:m:vwup:t:")) != -1) {
         switch (opt) {
         case 'i':
             opt_ifname = optarg;
@@ -479,10 +479,9 @@ int main(int argc, char** argv)
             opt_queueid = atoi(optarg);
             break;
         case 'm':
-            char* marg = optarg;
-            if (strcmp("native", marg) == 0) {
+            if (strcmp("native", optarg) == 0) {
                 opt_mode = XDP_MODE_NATIVE;
-            } else if (strcmp("generic", marg) == 0) {
+            } else if (strcmp("generic", optarg) == 0) {
                 opt_mode = XDP_MODE_SKB;
             } else {
                 dlog_error("Invalid XDP Mode");
@@ -501,9 +500,21 @@ int main(int argc, char** argv)
         case 'w':
             opt_needs_wakeup = 1;
             break;
-        // case 'u':
-        //     opt_udpmode = 1;
-        //     break;
+        case 't':
+            if (strcmp("icmp", optarg) == 0) {
+                opt_transportmode = IPPROTO_ICMP;
+            } else if (strcmp("raw", optarg) == 0) {
+                opt_transportmode = IPPROTO_RAW;
+            } else if (strcmp("udp", optarg) == 0) {
+                opt_transportmode = IPPROTO_UDP;
+            } else {
+                dlog_error("Invalid XDP Mode");
+                exit(EXIT_FAILURE);
+            }
+            break;
+        case 'p':
+            opt_polltimeout = atoi(optarg);
+            break;
         default:
             dlog_error("Invalid Arg\n");
             exit(EXIT_SUCCESS);
@@ -561,7 +572,7 @@ int main(int argc, char** argv)
     ret = xsk_socket__update_xskmap(xsk->socket, mapfd);
     printf("xsk_socket__update_xskmap says: %d\n", ret);
 
-    struct rx_ctx ctx = { .umem = umem, .xsk = xsk };
+    struct rx_ctx ctx = { .umem = umem, .xsk = xsk, .bench_mode = opt_transportmode, .poll_timeout = opt_polltimeout };
     pthread_t poller;
     pthread_create(&poller, NULL, poll_rx, (void*)&ctx);
     pthread_join(poller, NULL);
