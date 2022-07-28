@@ -244,6 +244,7 @@ setup()
     ip link set dev "$NS" up
     ip addr add dev "$NS" "${OUTSIDE_IP6}/${IP6_PREFIX_SIZE}"
     ethtool -K "$NS" rxvlan off txvlan off
+    ethtool --offload "$NS" rx off tx off
     # Prevent neighbour queries on the link
     INSIDE_MAC=$(iface_macaddr veth0 "$NS")
     ip neigh add "$INSIDE_IP6" lladdr "$INSIDE_MAC" dev "$NS" nud permanent
@@ -253,6 +254,8 @@ setup()
     ip -n "$NS" link set dev veth0 up
     ip -n "$NS" addr add dev veth0 "${INSIDE_IP6}/${IP6_PREFIX_SIZE}"
     ip netns exec "$NS" ethtool -K veth0 rxvlan off txvlan off
+    ip netns exec "$NS" ethtool --offload veth0 rx off tx off
+
     # Prevent neighbour queries on the link
     OUTSIDE_MAC=$(iface_macaddr "$NS")
     ip -n "$NS" neigh add "$OUTSIDE_IP6" lladdr "$OUTSIDE_MAC" dev veth0 nud permanent
