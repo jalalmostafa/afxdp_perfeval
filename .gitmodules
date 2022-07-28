@@ -1,4 +1,4 @@
 [submodule "xdp-tools"]
 	path = xdp-tools
-	url = git@github.com:xdp-project/xdp-tools.git
+	url = https://github.com/xdp-project/xdp-tools.git
 	active = false
