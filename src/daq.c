@@ -24,7 +24,7 @@
 #include "tcpip/ipv4.h"
 #include "tcpip/udp.h"
 
-#define UMEM_LEN 1000
+#define UMEM_LEN (1024 * 4)
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 #define UMEM_SIZE (UMEM_LEN * FRAME_SIZE)
 #define FRAME_INVALID -1
@@ -38,9 +38,10 @@
 typedef unsigned int queue_id;
 
 struct xsk_stat {
+    u64 rcvd_frames;
     u64 rcvd_pkts;
-    u64 rcvd_udps;
-    u64 fill_fail_polls;
+    u64 fail_polls;
+    u64 timeout_polls;
     u64 invalid_ip_pkts;
     u64 invalid_udp_pkts;
     u64 runtime;
@@ -67,6 +68,7 @@ typedef struct {
     u32 xdp_flags;
     u16 bind_flags;
     u32 batch_size;
+    struct xsk_stat stats;
 } xsk_info;
 
 __u32 break_flag = 0;
@@ -87,6 +89,11 @@ static umem_info* umem_info_create()
     }
 
     info->buffer = umem_buffer_create();
+    if (info->buffer == NULL) {
+        dlog_error2("umem_buffer_create", 0);
+        return NULL;
+    }
+
     info->umem = NULL;
 
     return info;
@@ -158,7 +165,7 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
     struct xdp_program* program = xdp_program__from_id(xdp_prog);
     enum xdp_attach_mode mode = xdp_program__is_attached(program, net->ifindex);
 
-    printf("XDP Program ID: %d Mode: %d\n", xdp_prog, mode);
+    dlog("XDP Program ID: %d Mode: %d\n", xdp_prog, mode);
 
     return 0;
 }
@@ -167,7 +174,7 @@ void log_pingpong(struct iphdr* packet)
 {
     __u32 saddr = ntohl(packet->saddr);
     __u32 daddr = ntohl(packet->daddr);
-    printf("[PING]: %i.%i.%i.%i is pinging %i.%i.%i.%i\n", (saddr >> 24) & 0xFF,
+    dlog("[PING]: %i.%i.%i.%i is pinging %i.%i.%i.%i\n", (saddr >> 24) & 0xFF,
         (saddr >> 16) & 0xFF, (saddr >> 8) & 0xFF, saddr & 0xFF,
         (daddr >> 24) & 0xFF, (daddr >> 16) & 0xFF, (daddr >> 8) & 0xFF,
         daddr & 0xFF);
@@ -176,7 +183,7 @@ void log_pingpong(struct iphdr* packet)
 void log_frame(struct ethhdr* frame)
 {
     int ethertype = ntohs(frame->h_proto);
-    printf("[SRC MAC] %02X:%02X:%02X:%02X:%02X:%02X - [DST MAC] %02X:%02X:%02X:%02X:%02X:%02X - [PROTO] 0x%04X\n",
+    dlog("[SRC MAC] %02X:%02X:%02X:%02X:%02X:%02X - [DST MAC] %02X:%02X:%02X:%02X:%02X:%02X - [PROTO] 0x%04X\n",
         frame->h_source[0], frame->h_source[1], frame->h_source[2], frame->h_source[3], frame->h_source[4], frame->h_source[5],
         frame->h_dest[0], frame->h_dest[1], frame->h_dest[2], frame->h_dest[3], frame->h_dest[4], frame->h_dest[5], ethertype);
 }
@@ -197,7 +204,6 @@ u8* construct_pong(struct ethhdr* frame, u32 len)
     int datalen = len - sizeof(struct ethhdr) - sizeof(struct iphdr) - sizeof(struct icmphdr);
 
     memset(pong_reply, 0, FRAME_SIZE);
-    printf("Data len: %d\n", datalen);
     int icmplen = sizeof(struct icmphdr) + datalen;
 
     struct icmphdr* pong = (struct icmphdr*)(pong_reply + sizeof(struct ethhdr) + sizeof(struct iphdr));
@@ -238,18 +244,18 @@ void log_icmp(u8* frame)
     log_pingpong(packet);
 }
 
-always_inline u8* process_frame(u8* buffer, u32 len)
+always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len)
 {
-    // FIXME: stats
-
     struct ethhdr* frame = (struct ethhdr*)buffer;
     int ethertype = ntohs(frame->h_proto);
+
+    xsk->stats.rcvd_frames++;
 
     if (ethertype != ETH_P_IP) {
         return NULL;
     }
 
-    // FIXME: xsk->stats.rcvd_pkts += 1;
+    xsk->stats.rcvd_pkts++;
 
     struct iphdr* packet = (struct iphdr*)(frame + 1);
     if (packet->version != 4) {
@@ -257,7 +263,7 @@ always_inline u8* process_frame(u8* buffer, u32 len)
     }
 
     if (!ip4_audit(packet, len - sizeof(struct ethhdr))) {
-        // FIXME: xsk->stats.invalid_ip_pkts++;
+        xsk->stats.invalid_ip_pkts++;
         return NULL;
     }
 
@@ -277,7 +283,7 @@ always_inline u8* process_frame(u8* buffer, u32 len)
         struct udphdr* udp = (struct udphdr*)(((u8*)packet) + ip4_get_header_size(packet));
         u32 udplen = ntohs(packet->tot_len) - ip4_get_header_size(packet);
         if (!udp_audit(udp, packet->saddr, packet->daddr, udplen)) {
-            // FIXME: xsk->stats.invalid_udp_pkts++;
+            xsk->stats.invalid_udp_pkts++;
             return NULL;
         }
         return (u8*)(udp + 1);
@@ -329,7 +335,7 @@ int xdp_pingpong(xsk_info* xsk, umem_info* umem)
 
         u8* frame = xsk_umem__get_data(umem->buffer, addr);
 
-        u8* pong = process_frame(frame, len);
+        u8* pong = process_frame(xsk, frame, len);
 
         if (pong != NULL) {
             memcpy(frame, pong, FRAME_SIZE);
@@ -375,13 +381,11 @@ always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
 
         u8* frame = xsk_umem__get_data(umem->buffer, addr);
 
-        u8* data = process_frame(frame, len);
+        u8* data = process_frame(xsk, frame, len);
 
         if (data != NULL) {
             // touch the data!
             data[0] = 1;
-        } else {
-            printf("data\n");
         }
         idx_rx++;
         idx_fq++;
@@ -412,9 +416,11 @@ void* poll_rx(void* rxctx_ptr)
     while (!break_flag) {
         int ret = poll(fds, 1, ctx->poll_timeout);
         if (ret < 0) {
-            printf("[Poll-%d] %s\n", __LINE__, strerror(errno));
+            dlog_error2("poll", ret);
+            xsk->stats.fail_polls++;
         } else if (ret == 0) {
-            printf("[Poll] Timeout\n");
+            dlog_info("[Poll] Timeout\n");
+            xsk->stats.timeout_polls++;
         } else if (fds[0].revents == POLLIN) {
             switch (ctx->bench_mode) {
             case IPPROTO_RAW:
@@ -434,7 +440,6 @@ void* poll_rx(void* rxctx_ptr)
 
 void signal_handler(int sig)
 {
-    printf("signal: %d\n", sig);
     switch (sig) {
     case SIGINT:
     case SIGTERM:
@@ -453,12 +458,39 @@ int infoprint(enum libbpf_print_level level,
     return vfprintf(stderr, format, ap);
 }
 
+u64 clock_nsecs()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000UL + ts.tv_nsec;
+}
+
+#define AVG_PPS(pkts, rt) (pkts * 1e9 / rt)
+
+void xsk_stats_dump(struct xsk_stat stats)
+{
+    printf("Run Statistics:\n"
+           "    Total run time:     %llu\n"
+           "    Received Frames:    %llu\n"
+           "    Average FPS:        %f\n"
+           "    Received Packets:   %llu\n"
+           "    Average PPS:        %f\n"
+           "    Invalid L3 Packets: %llu\n"
+           "    Invalid L4 Packets: %llu\n"
+           "    Failed Polls:       %llu\n"
+           "    Timeout Polls:      %llu\n",
+        stats.runtime, stats.rcvd_frames, AVG_PPS(stats.rcvd_frames, stats.runtime), stats.rcvd_pkts, AVG_PPS(stats.rcvd_pkts, stats.runtime),
+        stats.invalid_ip_pkts, stats.invalid_udp_pkts, stats.fail_polls,
+        stats.timeout_polls);
+}
+
 int main(int argc, char** argv)
 {
     int ifindex, ret, opt;
     char* opt_ifname = NULL;
     enum xdp_attach_mode opt_mode = XDP_MODE_NATIVE;
     u32 opt_queueid = -1, opt_batchsize = 64;
+    // opt_pps = UMEM_LEN;
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1, opt_transportmode = IPPROTO_ICMP;
     int opt_polltimeout = 1000;
     //  u32 zero_copy_working = 0;
@@ -469,7 +501,7 @@ int main(int argc, char** argv)
     signal(SIGTERM, signal_handler);
     signal(SIGABRT, signal_handler);
 
-    while ((opt = getopt(argc, argv, "cb:i:q:m:vwup:t:")) != -1) {
+    while ((opt = getopt(argc, argv, "cb:i:q:m:vwp:t:s:")) != -1) {
         switch (opt) {
         case 'i':
             opt_ifname = optarg;
@@ -515,6 +547,9 @@ int main(int argc, char** argv)
         case 'p':
             opt_polltimeout = atoi(optarg);
             break;
+        // case 's':
+        //     opt_pps = atoi(optarg);
+        //     break;
         default:
             dlog_error("Invalid Arg\n");
             exit(EXIT_SUCCESS);
@@ -530,17 +565,17 @@ int main(int argc, char** argv)
         libbpf_set_print(infoprint);
     }
 
-    if (setrlimit(RLIMIT_MEMLOCK, &rlim)) {
-        fprintf(stderr, "ERROR: setrlimit(RLIMIT_MEMLOCK) \"%s\"\n",
-            strerror(errno));
-        exit(EXIT_FAILURE);
+    if ((ret = setrlimit(RLIMIT_MEMLOCK, &rlim))) {
+        dlog_error2("setrlimit", ret);
+        goto cleanup;
     }
 
     struct xdp_program* kern_prog = xdp_program__open_file("./bpf/xsk.bpf.o", NULL, NULL);
 
     ret = xdp_program__attach(kern_prog, ifindex, opt_mode, 0);
     if (ret) {
-        goto error;
+        dlog_error2("xdp_program__attach", ret);
+        goto cleanup;
     }
 
     xsk_info* xsk = (xsk_info*)calloc(1, sizeof(xsk_info));
@@ -564,24 +599,27 @@ int main(int argc, char** argv)
     ret = xsk_configure(xsk, &net, umem);
 
     if (ret) {
-        goto error;
+        dlog_error2("xsk_configure", ret);
+        goto cleanup;
     }
+
     struct bpf_object* obj = xdp_program__bpf_obj(kern_prog);
     int mapfd = bpf_object__find_map_fd_by_name(obj, "xsks_map");
-    printf("mapfd: %d\n", mapfd);
+    dlog("Map ID: %d\n", mapfd);
     ret = xsk_socket__update_xskmap(xsk->socket, mapfd);
-    printf("xsk_socket__update_xskmap says: %d\n", ret);
+    if (ret) {
+        dlog_error2("xsk_socket__update_xskmap", ret);
+    }
 
     struct rx_ctx ctx = { .umem = umem, .xsk = xsk, .bench_mode = opt_transportmode, .poll_timeout = opt_polltimeout };
     pthread_t poller;
+    u64 t0 = clock_nsecs();
     pthread_create(&poller, NULL, poll_rx, (void*)&ctx);
     pthread_join(poller, NULL);
+    u64 t1 = clock_nsecs();
+    xsk->stats.runtime = t1 - t0;
 
-    goto cleanup;
-error:
-    perror("Error");
-    printf("Return Code: %d, Errno %d\n", ret, errno);
-
+    xsk_stats_dump(xsk->stats);
 cleanup:
     xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
     xdp_program__close(kern_prog);

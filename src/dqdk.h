@@ -66,12 +66,10 @@ always_inline void set_hugepages(int nb_hugepages)
 u8* huge_malloc(u64 size)
 {
     int needed_hgpg = HUGETLB_CALC(size);
-    int avail_hgpg = get_hugepages();
-    set_hugepages(needed_hgpg + avail_hgpg);
-    // | MAP_HUGETLB | MAP_HUGE_2MB
+    set_hugepages(needed_hgpg);
 
     void* map = mmap(NULL, size, PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
 
     if (map == MAP_FAILED) {
         dlog_error2("huge_malloc", (int)(u64)map);
