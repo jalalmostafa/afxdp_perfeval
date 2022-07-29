@@ -1,5 +1,4 @@
-TOOL_NAME    := xdpsock
-# XDP_TARGETS  := bpf/xsk.bpf
+TOOL_NAME    := daq
 XDP_TARGETS  := bpf/xsk.bpf
 USER_TARGETS := daq
 TEST_FILE    := 
@@ -7,7 +6,6 @@ TEST_FILE    :=
 LIB_DIR       = $(abspath ../xdp-tools/lib)
 USER_LIBS    := -lpthread
 MAN_PAGE     := 
-# EXTRA_USER_DEPS := tcpip/inet_csum.o tcpip/icmp4.o xsk.o
 
 CFLAGS += -g -std=gnu11 -I$(realpath .)
 

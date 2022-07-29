@@ -113,6 +113,7 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
     u32 xdp_prog = -1;
 
     if (umem == NULL) {
+        dlog_error("Invalid umem buffer: NULL");
         return EINVAL;
     }
 
@@ -127,6 +128,7 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
     ret = xsk_umem__create(&umem->umem, umem->buffer, UMEM_SIZE,
         &umem->fill_ring, &umem->comp_ring, &cfg);
     if (ret) {
+        dlog_error2("xsk_umem__create", ret);
         return ret;
     }
 
@@ -134,6 +136,7 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
     u32 idx;
     ret = xsk_ring_prod__reserve(&umem->fill_ring, FILLQ_LEN, &idx);
     if (ret != FILLQ_LEN) {
+        dlog_error2("xsk_ring_prod__reserve", ret);
         return EIO;
     }
 
@@ -155,11 +158,13 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
     ret = xsk_socket__create(&xsk->socket, net->ifname, net->qid, umem->umem,
         &xsk->rx, &xsk->tx, &xsk_config);
     if (ret) {
+        dlog_error2("xsk_socket__create", ret);
         return ret;
     }
 
     ret = bpf_get_link_xdp_id(net->ifindex, &xdp_prog, xsk->xdp_flags);
     if (ret) {
+        dlog_error2("bpf_get_link_xdp_id", ret);
         return ret;
     }
     struct xdp_program* program = xdp_program__from_id(xdp_prog);
@@ -479,9 +484,10 @@ void xsk_stats_dump(struct xsk_stat stats)
            "    Invalid L4 Packets: %llu\n"
            "    Failed Polls:       %llu\n"
            "    Timeout Polls:      %llu\n",
-        stats.runtime, stats.rcvd_frames, AVG_PPS(stats.rcvd_frames, stats.runtime), stats.rcvd_pkts, AVG_PPS(stats.rcvd_pkts, stats.runtime),
-        stats.invalid_ip_pkts, stats.invalid_udp_pkts, stats.fail_polls,
-        stats.timeout_polls);
+        stats.runtime, stats.rcvd_frames,
+        AVG_PPS(stats.rcvd_frames, stats.runtime), stats.rcvd_pkts,
+        AVG_PPS(stats.rcvd_pkts, stats.runtime), stats.invalid_ip_pkts,
+        stats.invalid_udp_pkts, stats.fail_polls, stats.timeout_polls);
 }
 
 int main(int argc, char** argv)
@@ -493,7 +499,7 @@ int main(int argc, char** argv)
     // opt_pps = UMEM_LEN;
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1, opt_transportmode = IPPROTO_ICMP;
     int opt_polltimeout = 1000;
-    //  u32 zero_copy_working = 0;
+    u32 zero_copy_working = 0;
 
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
 

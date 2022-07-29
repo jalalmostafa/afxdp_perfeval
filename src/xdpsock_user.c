@@ -36,6 +36,7 @@
 #include <bpf/xsk.h>
 #include <bpf/bpf.h>
 #include "xdpsock.h"
+#include "dlog.h"
 
 /* libbpf APIs for AF_XDP are deprecated starting from v0.7 */
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
