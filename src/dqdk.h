@@ -38,7 +38,6 @@ always_inline int get_hugepages()
     }
 
     int nb_hugepages = atoi(buffer);
-    dlog("Number of 2MB huge pages: %d\n", nb_hugepages);
     close(fd);
     return nb_hugepages;
 }
@@ -66,7 +65,8 @@ always_inline void set_hugepages(int nb_hugepages)
 u8* huge_malloc(u64 size)
 {
     int needed_hgpg = HUGETLB_CALC(size);
-    set_hugepages(needed_hgpg);
+    int current_hgpg = get_hugepages();
+    set_hugepages(current_hgpg + needed_hgpg);
 
     void* map = mmap(NULL, size, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
@@ -79,16 +79,13 @@ u8* huge_malloc(u64 size)
     return (u8*)map;
 }
 
-u32 next_power_of_2(u32 v)
+u64 clock_nsecs()
 {
-    v--;
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-    v++;
-    return v;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000UL + ts.tv_nsec;
 }
+
+#define MAX(x, y) (((x) > (y)) ? (x) : (y))
 
 #endif

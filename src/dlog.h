@@ -18,5 +18,6 @@
     __FILE__, __LINE__, ret, strerror(errno));
 
 #define dlog_info(info) dlog("[INFO] %s\n", info)
+#define dlog_infov(infofmt, vargs...) dlog("[INFO] " infofmt "\n", vargs)
 
 #endif

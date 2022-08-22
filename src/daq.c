@@ -4,6 +4,7 @@
 #include <bpf/libbpf.h>
 #include <errno.h>
 #include <linux/icmp.h>
+#include <linux/if_link.h>
 #include <linux/if_ether.h>
 #include <linux/if_xdp.h>
 #include <netinet/udp.h>
@@ -21,49 +22,45 @@
 #include <xdp/xsk.h>
 
 #include "dqdk.h"
+#include "dqdkconf.h"
 #include "tcpip/ipv4.h"
 #include "tcpip/udp.h"
 
 #define UMEM_LEN (1024 * 4)
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
+
 #define UMEM_SIZE (UMEM_LEN * FRAME_SIZE)
-#define FRAME_INVALID -1
-#define FILLQ_LEN XSK_RING_PROD__DEFAULT_NUM_DESCS * 2
+#define FILLQ_LEN (XSK_RING_PROD__DEFAULT_NUM_DESCS * 2)
 #define COMPQ_LEN XSK_RING_CONS__DEFAULT_NUM_DESCS
-
-#define NETIF "veth0"
-#define XDP_MODE XDP_MODE_NATIVE
-#define QUEUE_ID 0
-
-typedef unsigned int queue_id;
 
 struct xsk_stat {
     u64 rcvd_frames;
     u64 rcvd_pkts;
     u64 fail_polls;
     u64 timeout_polls;
+    u64 rx_empty_polls;
+    u64 rx_fill_fail_polls;
     u64 invalid_ip_pkts;
     u64 invalid_udp_pkts;
     u64 runtime;
+    struct xdp_statistics xstats;
 };
 
 typedef struct {
     struct xsk_umem* umem;
-    struct xsk_ring_prod fill_ring;
-    struct xsk_ring_cons comp_ring;
+    struct xsk_ring_prod* fill_ring;
+    struct xsk_ring_cons* comp_ring;
+    u32 count;
     void* buffer;
 } umem_info;
 
 typedef struct {
-    char* ifname;
-    queue_id qid;
-    u32 ifindex;
-} net_info;
-
-typedef struct {
+    u32 index;
+    u32 queue_id;
     struct xsk_socket* socket;
     struct xsk_ring_prod tx;
     struct xsk_ring_cons rx;
+    umem_info* umem_info;
     u32 libbpf_flags;
     u32 xdp_flags;
     u16 bind_flags;
@@ -71,22 +68,19 @@ typedef struct {
     struct xsk_stat stats;
 } xsk_info;
 
-__u32 break_flag = 0;
+u32 break_flag = 0;
 
 static void* umem_buffer_create()
 {
     // use huge pages?
-    return mmap(NULL, UMEM_SIZE, PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    // return mmap(NULL, UMEM_SIZE, PROT_READ | PROT_WRITE,
+    //     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return huge_malloc(UMEM_SIZE);
 }
 
-static umem_info* umem_info_create()
+static umem_info* umem_info_create(u32 count)
 {
     umem_info* info = (umem_info*)calloc(1, sizeof(umem_info));
-
-    if (info == NULL) {
-        return NULL;
-    }
 
     info->buffer = umem_buffer_create();
     if (info->buffer == NULL) {
@@ -95,7 +89,9 @@ static umem_info* umem_info_create()
     }
 
     info->umem = NULL;
-
+    info->count = count;
+    info->comp_ring = (struct xsk_ring_cons*)calloc(info->count, sizeof(struct xsk_ring_cons));
+    info->fill_ring = (struct xsk_ring_prod*)calloc(info->count, sizeof(struct xsk_ring_prod));
     return info;
 }
 
@@ -103,14 +99,15 @@ static void umem_info_free(umem_info* info)
 {
     if (info != NULL) {
         munmap(info->buffer, UMEM_SIZE);
+        free(info->fill_ring);
+        free(info->comp_ring);
         xsk_umem__delete(info->umem);
     }
 }
 
-static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
+static int umem_configure(umem_info* umem)
 {
-    int ret = 0;
-    u32 xdp_prog = -1;
+    int ret;
 
     if (umem == NULL) {
         dlog_error("Invalid umem buffer: NULL");
@@ -122,11 +119,11 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
         .comp_size = COMPQ_LEN,
         .frame_size = XSK_UMEM__DEFAULT_FRAME_SIZE,
         .frame_headroom = XSK_UMEM__DEFAULT_FRAME_HEADROOM,
-        .flags = 0
+        .flags = 0 // XDP_UMEM_UNALIGNED_CHUNK_FLAG
     };
 
     ret = xsk_umem__create(&umem->umem, umem->buffer, UMEM_SIZE,
-        &umem->fill_ring, &umem->comp_ring, &cfg);
+        &umem->fill_ring[0], &umem->comp_ring[0], &cfg);
     if (ret) {
         dlog_error2("xsk_umem__create", ret);
         return ret;
@@ -134,7 +131,7 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
 
     // push all frames to fill ring
     u32 idx;
-    ret = xsk_ring_prod__reserve(&umem->fill_ring, FILLQ_LEN, &idx);
+    ret = xsk_ring_prod__reserve(&umem->fill_ring[0], FILLQ_LEN, &idx);
     if (ret != FILLQ_LEN) {
         dlog_error2("xsk_ring_prod__reserve", ret);
         return EIO;
@@ -142,35 +139,55 @@ static int xsk_configure(xsk_info* xsk, net_info* net, umem_info* umem)
 
     // fill addresses
     for (int i = 0; i < FILLQ_LEN; i++) {
-        *xsk_ring_prod__fill_addr(&umem->fill_ring, idx++) = i * FRAME_SIZE;
+        *xsk_ring_prod__fill_addr(&umem->fill_ring[0], idx++) = i * FRAME_SIZE;
     }
 
-    xsk_ring_prod__submit(&umem->fill_ring, FILLQ_LEN);
+    xsk_ring_prod__submit(&umem->fill_ring[0], FILLQ_LEN);
+    return 0;
+}
+
+static int xsk_configure(xsk_info* xsk, const char* ifname)
+{
+    int ret = 0;
 
     const struct xsk_socket_config xsk_config = {
         .rx_size = XSK_RING_CONS__DEFAULT_NUM_DESCS,
-        .tx_size = XSK_RING_PROD__DEFAULT_NUM_DESCS,
+        .tx_size = COMPQ_LEN,
         .bind_flags = xsk->bind_flags,
         .libbpf_flags = xsk->libbpf_flags,
         .xdp_flags = xsk->xdp_flags
     };
 
-    ret = xsk_socket__create(&xsk->socket, net->ifname, net->qid, umem->umem,
-        &xsk->rx, &xsk->tx, &xsk_config);
+    ret = xsk_socket__create(&xsk->socket, ifname, xsk->queue_id, xsk->umem_info->umem,
+        &xsk->rx, NULL, &xsk_config);
     if (ret) {
         dlog_error2("xsk_socket__create", ret);
         return ret;
     }
 
-    ret = bpf_get_link_xdp_id(net->ifindex, &xdp_prog, xsk->xdp_flags);
+    u32 sockopt = 1;
+    ret = setsockopt(xsk_socket__fd(xsk->socket), SOL_SOCKET, SO_PREFER_BUSY_POLL,
+        (void*)&sockopt, sizeof(sockopt));
     if (ret) {
-        dlog_error2("bpf_get_link_xdp_id", ret);
+        dlog_error2("setsockopt(SO_PREFER_BUSY_POLL)", ret);
         return ret;
     }
-    struct xdp_program* program = xdp_program__from_id(xdp_prog);
-    enum xdp_attach_mode mode = xdp_program__is_attached(program, net->ifindex);
 
-    dlog("XDP Program ID: %d Mode: %d\n", xdp_prog, mode);
+    sockopt = 20;
+    ret = setsockopt(xsk_socket__fd(xsk->socket), SOL_SOCKET, SO_BUSY_POLL,
+        (void*)&sockopt, sizeof(sockopt));
+    if (ret) {
+        dlog_error2("setsockopt(SO_BUSY_POLL)", ret);
+        return ret;
+    }
+
+    sockopt = xsk->batch_size;
+    ret = setsockopt(xsk_socket__fd(xsk->socket), SOL_SOCKET, SO_BUSY_POLL_BUDGET,
+        (void*)&sockopt, sizeof(sockopt));
+    if (ret) {
+        dlog_error2("setsockopt(SO_BUSY_POLL_BUDGET)", ret);
+        return ret;
+    }
 
     return 0;
 }
@@ -252,16 +269,14 @@ void log_icmp(u8* frame)
 always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len)
 {
     struct ethhdr* frame = (struct ethhdr*)buffer;
-    int ethertype = ntohs(frame->h_proto);
+    u16 ethertype = ntohs(frame->h_proto);
 
     xsk->stats.rcvd_frames++;
-
     if (ethertype != ETH_P_IP) {
         return NULL;
     }
 
     xsk->stats.rcvd_pkts++;
-
     struct iphdr* packet = (struct iphdr*)(frame + 1);
     if (packet->version != 4) {
         return NULL;
@@ -272,174 +287,119 @@ always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len)
         return NULL;
     }
 
-    switch (packet->protocol) {
-    case IPPROTO_ICMP:
-        log_icmp(buffer);
-        struct icmphdr* icmp = (struct icmphdr*)(packet + 1);
-        if (icmp->type != ICMP_ECHO) {
-            return NULL;
-        }
-
-        u8* pong = construct_pong(frame, len);
-        log_icmp(pong);
-
-        return pong;
-    case IPPROTO_UDP:
-        struct udphdr* udp = (struct udphdr*)(((u8*)packet) + ip4_get_header_size(packet));
-        u32 udplen = ntohs(packet->tot_len) - ip4_get_header_size(packet);
-        if (!udp_audit(udp, packet->saddr, packet->daddr, udplen)) {
-            xsk->stats.invalid_udp_pkts++;
-            return NULL;
-        }
-        return (u8*)(udp + 1);
-    case IPPROTO_RAW:
-        return ((u8*)packet) + ip4_get_header_size(packet);
-    default:
+    struct udphdr* udp = (struct udphdr*)(((u8*)packet) + ip4_get_header_size(packet));
+    u32 udplen = ntohs(packet->tot_len) - ip4_get_header_size(packet);
+    if (!udp_audit(udp, packet->saddr, packet->daddr, udplen)) {
+        xsk->stats.invalid_udp_pkts++;
         return NULL;
     }
-}
-
-int xdp_pingpong(xsk_info* xsk, umem_info* umem)
-{
-    u32 idx_rx, idx_tx, idx_fq, idx_cq;
-
-    int recvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
-    if (!recvd) {
-        return ECOMM;
-    }
-
-    int ret = xsk_ring_prod__reserve(&umem->fill_ring, recvd, &idx_fq);
-
-    while (ret != recvd) {
-        if (ret < 0) {
-            return -ret;
-        }
-
-        ret = xsk_ring_prod__reserve(&umem->fill_ring, recvd, &idx_fq);
-    }
-
-    ret = xsk_ring_cons__peek(&umem->comp_ring, xsk->batch_size, &idx_cq);
-    if (ret > 0) {
-        xsk_ring_cons__release(&umem->comp_ring, recvd);
-        for (int i = 0; i < ret; i++)
-            *xsk_ring_prod__fill_addr(&umem->fill_ring, idx_fq++) = *xsk_ring_cons__comp_addr(&umem->comp_ring, idx_cq++);
-        xsk_ring_prod__submit(&umem->fill_ring, recvd);
-    }
-
-    ret = xsk_ring_prod__reserve(&xsk->tx, recvd, &idx_tx);
-    if (ret < 0) {
-        return -ret;
-    }
-
-    for (int i = 0; i < recvd; i++) {
-        u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
-        u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
-        u64 orig = xsk_umem__extract_addr(addr);
-
-        addr = xsk_umem__add_offset_to_addr(addr);
-
-        u8* frame = xsk_umem__get_data(umem->buffer, addr);
-
-        u8* pong = process_frame(xsk, frame, len);
-
-        if (pong != NULL) {
-            memcpy(frame, pong, FRAME_SIZE);
-
-            xsk_ring_prod__tx_desc(&xsk->tx, idx_tx)->addr = orig;
-            xsk_ring_prod__tx_desc(&xsk->tx, idx_tx)->len = len;
-            idx_tx++;
-        }
-        idx_rx++;
-        idx_fq++;
-    }
-
-    xsk_ring_cons__release(&xsk->rx, recvd);
-    xsk_ring_prod__submit(&xsk->tx, recvd);
-    return 0;
+    return (u8*)(udp + 1);
 }
 
 always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
 {
-    u32 idx_rx, idx_fq;
+    u32 idx_rx = 0, idx_fq = 0;
+    struct xsk_ring_prod* fq = umem->count == 1 ? umem->fill_ring : &umem->fill_ring[xsk->index];
 
     int rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
+
     if (!rcvd) {
+        if (xsk_ring_prod__needs_wakeup(fq)) {
+            xsk->stats.rx_empty_polls++;
+            recvfrom(xsk_socket__fd(xsk->socket), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+        }
         return ECOMM;
     }
 
-    int ret = xsk_ring_prod__reserve(&umem->fill_ring, rcvd, &idx_fq);
-
+    int ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
     while (ret != rcvd) {
         if (ret < 0) {
             return -ret;
         }
 
-        ret = xsk_ring_prod__reserve(&umem->fill_ring, rcvd, &idx_fq);
+        if (xsk_ring_prod__needs_wakeup(fq)) {
+            xsk->stats.rx_fill_fail_polls++;
+            recvfrom(xsk_socket__fd(xsk->socket), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+        }
+
+        ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
     }
 
     for (int i = 0; i < rcvd; i++) {
         u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
-        u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
+        addr = xsk_umem__add_offset_to_addr(addr);
         // u64 orig = xsk_umem__extract_addr(addr);
 
-        addr = xsk_umem__add_offset_to_addr(addr);
-
+#ifndef RX_DROP
+        u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
         u8* frame = xsk_umem__get_data(umem->buffer, addr);
 
         u8* data = process_frame(xsk, frame, len);
-
-        if (data != NULL) {
-            // touch the data!
-            data[0] = 1;
-        }
+        (void)data;
+#else
+        xsk_umem__get_data(umem->buffer, addr);
+#endif
         idx_rx++;
         idx_fq++;
     }
 
+#ifdef RX_DROP
+    xsk->stats.rcvd_frames += rcvd;
+#endif
+
     xsk_ring_cons__release(&xsk->rx, rcvd);
-    xsk_ring_prod__submit(&umem->fill_ring, rcvd);
+    xsk_ring_prod__submit(fq, rcvd);
     return 0;
 }
 
 struct rx_ctx {
-    xsk_info* xsk;
-    umem_info* umem;
-    int poll_timeout;
-    int bench_mode;
+    xsk_info* xsks;
+    u32 count;
+    u32 poll_timeout;
+    u8 bench_mode;
 };
 
 void* poll_rx(void* rxctx_ptr)
 {
     struct rx_ctx* ctx = (struct rx_ctx*)rxctx_ptr;
-    xsk_info* xsk = ctx->xsk;
-    umem_info* umem = ctx->umem;
-    struct pollfd fds[1];
-    memset(fds, 0, sizeof(fds));
+    xsk_info* xsks = ctx->xsks;
+    struct pollfd* fds = (struct pollfd*)calloc(ctx->count, sizeof(struct pollfd));
 
-    fds[0].fd = xsk_socket__fd(xsk->socket);
-    fds[0].events = POLLIN;
+    for (size_t i = 0; i < ctx->count; i++) {
+        fds[i].fd = xsk_socket__fd(xsks[i].socket);
+        fds[i].events = POLLIN;
+    }
+
+    u64 t0 = clock_nsecs();
     while (!break_flag) {
-        int ret = poll(fds, 1, ctx->poll_timeout);
+        int ret = poll(fds, ctx->count, ctx->poll_timeout);
         if (ret < 0) {
             dlog_error2("poll", ret);
-            xsk->stats.fail_polls++;
+            // xsk->stats.fail_polls++;
+            continue;
         } else if (ret == 0) {
-            dlog_info("[Poll] Timeout\n");
-            xsk->stats.timeout_polls++;
-        } else if (fds[0].revents == POLLIN) {
-            switch (ctx->bench_mode) {
-            case IPPROTO_RAW:
-            case IPPROTO_UDP:
-                xdp_udpip(xsk, umem);
-                break;
-            case IPPROTO_ICMP:
-            default:
-                xdp_pingpong(xsk, umem);
-                break;
+            dlog_info("[Poll] Timeout");
+            // xsk->stats.timeout_polls++;
+            continue;
+        } else {
+            for (size_t i = 0; i < ctx->count; i++) {
+                xdp_udpip(&xsks[i], xsks[i].umem_info);
             }
         }
     }
+    u64 t1 = clock_nsecs();
 
+    socklen_t socklen = sizeof(struct xdp_statistics);
+    for (size_t i = 0; i < ctx->count; i++) {
+        xsks[i].stats.runtime = t1 - t0;
+        int ret = getsockopt(xsk_socket__fd(xsks[i].socket), SOL_XDP,
+            XDP_STATISTICS, &xsks[i].stats.xstats, &socklen);
+        if (ret) {
+            dlog_error2("getsockopt(XDP_STATISTICS)", ret);
+        }
+    }
+
+    free(fds);
     return NULL;
 }
 
@@ -463,31 +423,41 @@ int infoprint(enum libbpf_print_level level,
     return vfprintf(stderr, format, ap);
 }
 
-u64 clock_nsecs()
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000000000UL + ts.tv_nsec;
-}
-
 #define AVG_PPS(pkts, rt) (pkts * 1e9 / rt)
 
-void xsk_stats_dump(struct xsk_stat stats)
+void stats_dump(struct xsk_stat* stats)
 {
-    printf("Run Statistics:\n"
-           "    Total run time:     %llu\n"
-           "    Received Frames:    %llu\n"
-           "    Average FPS:        %f\n"
-           "    Received Packets:   %llu\n"
-           "    Average PPS:        %f\n"
-           "    Invalid L3 Packets: %llu\n"
-           "    Invalid L4 Packets: %llu\n"
-           "    Failed Polls:       %llu\n"
-           "    Timeout Polls:      %llu\n",
-        stats.runtime, stats.rcvd_frames,
-        AVG_PPS(stats.rcvd_frames, stats.runtime), stats.rcvd_pkts,
-        AVG_PPS(stats.rcvd_pkts, stats.runtime), stats.invalid_ip_pkts,
-        stats.invalid_udp_pkts, stats.fail_polls, stats.timeout_polls);
+    printf("    Total runtime (ns):     %llu\n"
+           "    Received Frames:        %llu\n"
+           "    Average FPS:            %f\n"
+           "    Received Packets:       %llu\n"
+           "    Average PPS:            %f\n"
+           "    Invalid L3 Packets:     %llu\n"
+           "    Invalid L4 Packets:     %llu\n"
+           "    Failed Polls:           %llu\n"
+           "    Timeout Polls:          %llu\n"
+           "    XSK Fill Fail Polls:    %llu\n"
+           "    XSK RXQ Empty:          %llu\n"
+           "    XSK RX Dropped:         %llu\n"
+           "    XSK RX FillQ Empty:     %llu\n"
+           "    XSK RX Invalid Descs:   %llu\n"
+           "    XSK RX Ring Full:       %llu\n"
+           "    XSK TX Invalid Descs:   %llu\n"
+           "    XSK TX Ring Empty:      %llu\n",
+        stats->runtime, stats->rcvd_frames,
+        AVG_PPS(stats->rcvd_frames, stats->runtime), stats->rcvd_pkts,
+        AVG_PPS(stats->rcvd_pkts, stats->runtime), stats->invalid_ip_pkts,
+        stats->invalid_udp_pkts, stats->fail_polls, stats->timeout_polls,
+        stats->rx_fill_fail_polls, stats->rx_empty_polls,
+        stats->xstats.rx_dropped, stats->xstats.rx_fill_ring_empty_descs,
+        stats->xstats.rx_invalid_descs, stats->xstats.rx_ring_full,
+        stats->xstats.tx_invalid_descs, stats->xstats.tx_ring_empty_descs);
+}
+
+void xsk_stats_dump(xsk_info* xsk)
+{
+    printf("XSK %u on Queue %u Statistics:\n", xsk->index, xsk->queue_id);
+    stats_dump(&xsk->stats);
 }
 
 int main(int argc, char** argv)
@@ -495,26 +465,50 @@ int main(int argc, char** argv)
     int ifindex, ret, opt;
     char* opt_ifname = NULL;
     enum xdp_attach_mode opt_mode = XDP_MODE_NATIVE;
-    u32 opt_queueid = -1, opt_batchsize = 64;
-    // opt_pps = UMEM_LEN;
-    u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1, opt_transportmode = IPPROTO_ICMP;
-    int opt_polltimeout = 1000;
-    u32 zero_copy_working = 0;
+    u32 opt_batchsize = 64, opt_queues[MAX_SOCKS] = { -1 }, opt_shared_umem = 0,
+        opt_polltimeout = 1000;
+    u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1, opt_threaded = 0,
+       opt_transportmode = IPPROTO_UDP;
 
+    struct xdp_options xdp_opts;
+    socklen_t socklen;
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
+    u32 xsks_nb = 0;
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     signal(SIGABRT, signal_handler);
 
-    while ((opt = getopt(argc, argv, "cb:i:q:m:vwp:t:s:")) != -1) {
+    while ((opt = getopt(argc, argv, "b:ci:l:m:p:q:s:tvw")) != -1) {
         switch (opt) {
         case 'i':
             opt_ifname = optarg;
             ifindex = if_nametoindex(opt_ifname);
             break;
         case 'q':
-            opt_queueid = atoi(optarg);
+            if (strchr(optarg, '-') == NULL) {
+                xsks_nb = 1;
+                opt_queues[0] = atoi(optarg);
+            } else {
+                char* delimiter = NULL;
+                u32 start = strtol(optarg, &delimiter, 10), end;
+                if (delimiter != NULL) {
+                    end = strtol(++delimiter, &delimiter, 10);
+                } else {
+                    dlog_error("Invalid queue range");
+                    exit(EXIT_FAILURE);
+                }
+
+                xsks_nb = (end - start) + 1;
+                if (xsks_nb > MAX_SOCKS) {
+                    dlog_errorv("Too many queues. Maximum is %d", MAX_SOCKS);
+                    exit(EXIT_FAILURE);
+                }
+
+                for (u32 idx = 0; idx < xsks_nb; ++idx) {
+                    opt_queues[idx] = start + idx;
+                }
+            }
             break;
         case 'm':
             if (strcmp("native", optarg) == 0) {
@@ -538,28 +532,43 @@ int main(int argc, char** argv)
         case 'w':
             opt_needs_wakeup = 1;
             break;
-        case 't':
-            if (strcmp("icmp", optarg) == 0) {
-                opt_transportmode = IPPROTO_ICMP;
-            } else if (strcmp("raw", optarg) == 0) {
+        case 'l':
+            if (strcmp("ip", optarg) == 0) {
                 opt_transportmode = IPPROTO_RAW;
             } else if (strcmp("udp", optarg) == 0) {
                 opt_transportmode = IPPROTO_UDP;
             } else {
-                dlog_error("Invalid XDP Mode");
+                dlog_error("Invalid Protocol");
                 exit(EXIT_FAILURE);
             }
             break;
         case 'p':
             opt_polltimeout = atoi(optarg);
             break;
-        // case 's':
-        //     opt_pps = atoi(optarg);
-        //     break;
+        case 's':
+            opt_shared_umem = atoi(optarg);
+            break;
+        case 't':
+            opt_threaded = 1;
+            break;
         default:
             dlog_error("Invalid Arg\n");
-            exit(EXIT_SUCCESS);
+            exit(EXIT_FAILURE);
         }
+    }
+
+    switch (opt_mode) {
+    case XDP_MODE_SKB:
+        dlog_info("XDP generic mode is active!");
+        break;
+    case XDP_MODE_NATIVE:
+        dlog_info("XDP driver mode is active!");
+        break;
+    case XDP_MODE_HW:
+        dlog_info("XDP HW-Offloading is active!");
+        break;
+    default:
+        break;
     }
 
     if (opt_zcopy && opt_mode == XDP_MODE_SKB) {
@@ -569,6 +578,38 @@ int main(int argc, char** argv)
 
     if (opt_verbose) {
         libbpf_set_print(infoprint);
+    }
+
+    if (opt_threaded) {
+        dlog_info("Multithreading is turned on. One thread per socket.");
+    } else {
+        dlog_info("Multithreading is turned off. Polling all sockets...");
+    }
+
+    char queues[5 * MAX_SOCKS] = { 0 };
+    char* queues_format = queues;
+    for (u32 i = 0; i < xsks_nb; i++) {
+        ret = (i == xsks_nb - 1) ? snprintf(queues_format, 5, "%d", opt_queues[i])
+                                 : snprintf(queues_format, 5, "%d, ", opt_queues[i]);
+        queues_format += ret;
+    }
+
+    if (opt_shared_umem) {
+        if (xsks_nb != 1) {
+            // TODO: support shared umem on many queues
+            dlog_error("Shared UMEM works only on one queue");
+            goto cleanup;
+        } else {
+            xsks_nb = opt_shared_umem;
+            u32 qid = opt_queues[0];
+            for (size_t i = 0; i < MAX_SOCKS; i++) {
+                opt_queues[i] = qid;
+            }
+
+            dlog_infov("Working %d XSKs with shared UMEM on queue %s", xsks_nb, queues);
+        }
+    } else {
+        dlog_infov("Working %d XSKs on queues: %s", xsks_nb, queues);
     }
 
     if ((ret = setrlimit(RLIMIT_MEMLOCK, &rlim))) {
@@ -584,57 +625,146 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    xsk_info* xsk = (xsk_info*)calloc(1, sizeof(xsk_info));
-    xsk->batch_size = opt_batchsize;
-    xsk->libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
-    xsk->bind_flags |= (opt_zcopy ? XDP_ZEROCOPY : XDP_COPY);
-
-    if (opt_needs_wakeup) {
-        xsk->bind_flags |= XDP_USE_NEED_WAKEUP;
-    }
-
-    xsk->xdp_flags = 0;
-
-    net_info net = {
-        .ifname = opt_ifname,
-        .qid = opt_queueid,
-        .ifindex = ifindex
-    };
-
-    umem_info* umem = umem_info_create();
-    ret = xsk_configure(xsk, &net, umem);
-
-    if (ret) {
-        dlog_error2("xsk_configure", ret);
-        goto cleanup;
-    }
-
     struct bpf_object* obj = xdp_program__bpf_obj(kern_prog);
     int mapfd = bpf_object__find_map_fd_by_name(obj, "xsks_map");
-    dlog("Map ID: %d\n", mapfd);
-    ret = xsk_socket__update_xskmap(xsk->socket, mapfd);
-    if (ret) {
-        dlog_error2("xsk_socket__update_xskmap", ret);
+
+    pthread_t* xsk_workers = NULL;
+    if (opt_threaded) {
+        xsk_workers = (pthread_t*)calloc(xsks_nb, sizeof(pthread_t));
+    }
+    xsk_info* xsks = (xsk_info*)calloc(xsks_nb, sizeof(xsk_info));
+    umem_info* shared_umem = NULL;
+
+    if (opt_shared_umem) {
+        shared_umem = opt_threaded ? umem_info_create(xsks_nb) : umem_info_create(1);
+        umem_configure(shared_umem);
     }
 
-    struct rx_ctx ctx = { .umem = umem, .xsk = xsk, .bench_mode = opt_transportmode, .poll_timeout = opt_polltimeout };
-    pthread_t poller;
-    u64 t0 = clock_nsecs();
-    pthread_create(&poller, NULL, poll_rx, (void*)&ctx);
-    pthread_join(poller, NULL);
-    u64 t1 = clock_nsecs();
-    xsk->stats.runtime = t1 - t0;
+    for (u32 i = 0; i < xsks_nb; i++) {
+        xsks[i].batch_size = opt_batchsize;
+        xsks[i].libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
+        xsks[i].bind_flags = (opt_zcopy ? XDP_ZEROCOPY : XDP_COPY)
+            | (opt_needs_wakeup ? XDP_USE_NEED_WAKEUP : 0);
 
-    xsk_stats_dump(xsk->stats);
+        if (i != 0 && opt_shared_umem) {
+            xsks[i].bind_flags = XDP_SHARED_UMEM;
+        }
+
+        xsks[i].xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST;
+        xsks[i].queue_id = opt_queues[i];
+        xsks[i].index = i;
+
+        if (opt_shared_umem) {
+            xsks[i].umem_info = shared_umem;
+        } else {
+            xsks[i].umem_info = umem_info_create(1);
+            umem_configure(xsks[i].umem_info);
+        }
+
+        ret = xsk_configure(&xsks[i], opt_ifname);
+
+        if (ret) {
+            dlog_error2("xsk_configure", ret);
+            goto cleanup;
+        }
+
+        u32 sockfd = xsk_socket__fd(xsks[i].socket);
+        ret = bpf_map_update_elem(mapfd, &xsks[i].queue_id, &sockfd, BPF_ANY);
+        if (ret) {
+            dlog_error2("bpf_map_update_elem", ret);
+            goto cleanup;
+        }
+
+        if (i == 0) {
+            socklen = sizeof(struct xdp_options);
+            ret = getsockopt(xsk_socket__fd(xsks[i].socket), SOL_XDP,
+                XDP_OPTIONS, &xdp_opts, &socklen);
+            if (ret) {
+                dlog_error2("getsockopt(XDP_OPTIONS)", ret);
+            } else if (xdp_opts.flags & XDP_OPTIONS_ZEROCOPY) {
+                dlog_info("Zero copy is activated!");
+            } else {
+                dlog_info("Zero copy is NOT activated!");
+            }
+        }
+
+        if (opt_threaded) {
+            struct rx_ctx ctx = {
+                .xsks = &xsks[i],
+                .bench_mode = opt_transportmode,
+                .poll_timeout = opt_polltimeout,
+                .count = 1,
+            };
+            pthread_create(&xsk_workers[i], NULL, poll_rx, (void*)&ctx);
+        }
+    }
+
+    if (!opt_threaded) {
+        struct rx_ctx ctx = {
+            .xsks = xsks,
+            .bench_mode = opt_transportmode,
+            .poll_timeout = opt_polltimeout,
+            .count = xsks_nb,
+        };
+
+        poll_rx(&ctx);
+    }
+
+    struct xsk_stat avg_stats;
+    memset(&avg_stats, 0, sizeof(avg_stats));
+    for (u32 i = 0; i < xsks_nb; i++) {
+        if (opt_threaded) {
+            pthread_join(xsk_workers[i], NULL);
+        }
+
+        xsk_stats_dump(&xsks[i]);
+        avg_stats.runtime = MAX(avg_stats.runtime, xsks[i].stats.runtime);
+        avg_stats.fail_polls += xsks[i].stats.fail_polls;
+        avg_stats.invalid_ip_pkts += xsks[i].stats.invalid_ip_pkts;
+        avg_stats.invalid_udp_pkts += xsks[i].stats.invalid_udp_pkts;
+        avg_stats.rcvd_frames += xsks[i].stats.rcvd_frames;
+        avg_stats.rcvd_pkts += xsks[i].stats.rcvd_pkts;
+        avg_stats.rx_empty_polls += xsks[i].stats.rx_empty_polls;
+        avg_stats.rx_fill_fail_polls += xsks[i].stats.rx_fill_fail_polls;
+        avg_stats.timeout_polls += xsks[i].stats.timeout_polls;
+        avg_stats.xstats.rx_dropped += xsks[i].stats.xstats.rx_dropped;
+        avg_stats.xstats.rx_invalid_descs += xsks[i].stats.xstats.rx_invalid_descs;
+        avg_stats.xstats.tx_invalid_descs += xsks[i].stats.xstats.tx_invalid_descs;
+        avg_stats.xstats.rx_ring_full += xsks[i].stats.xstats.rx_ring_full;
+        avg_stats.xstats.rx_fill_ring_empty_descs += xsks[i].stats.xstats.rx_fill_ring_empty_descs;
+        avg_stats.xstats.tx_ring_empty_descs += xsks[i].stats.xstats.tx_ring_empty_descs;
+    }
+
+    if (xsks_nb != 1) {
+        printf("Average Stats:\n");
+        stats_dump(&avg_stats);
+    }
 cleanup:
     xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
     xdp_program__close(kern_prog);
-    if (xsk != NULL) {
-        xsk_socket__delete(xsk->socket);
-        free(xsk);
+
+    if (xsks != NULL) {
+
+        for (size_t i = 0; i < xsks_nb; i++) {
+            xsk_info xsk = xsks[i];
+            xsk_socket__delete(xsk.socket);
+
+            if (!opt_shared_umem && xsk.umem_info != NULL) {
+                umem_info_free(xsk.umem_info);
+                free(xsk.umem_info);
+            }
+        }
+        free(xsks);
+        free(xsk_workers);
     }
 
-    if (umem != NULL) {
-        umem_info_free(umem);
+    if (opt_shared_umem) {
+        umem_info_free(shared_umem);
+
+        if (shared_umem != NULL) {
+            free(shared_umem);
+        }
     }
+
+    set_hugepages(0);
 }

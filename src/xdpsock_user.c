@@ -1946,13 +1946,15 @@ int main(int argc, char** argv)
         goto out;
     }
 
+    u64 t0 = get_nsecs();
     if (opt_bench == BENCH_RXDROP)
         rx_drop_all();
     else if (opt_bench == BENCH_TXONLY)
         tx_only_all();
     else
         l2fwd_all();
-
+    u64 t1 = get_nsecs();
+    printf("duration: %llu\n", t1-t0);
     struct xdp_statistics dbg_stat;
     u32 xdp_statistics_len = sizeof(struct xdp_statistics);
     getsockopt(xsk_socket__fd(xsks[0]->xsk), SOL_XDP, XDP_STATISTICS, &dbg_stat, &xdp_statistics_len);
