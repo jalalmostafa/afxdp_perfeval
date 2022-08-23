@@ -1,5 +1,5 @@
 TOOL_NAME    := daq
-XDP_TARGETS  := bpf/xsk.bpf
+XDP_TARGETS  := bpf/xsk.bpf bpf/rr2.bpf bpf/rr3.bpf bpf/rr4.bpf 
 USER_TARGETS := daq
 # XDP_TARGETS  := xdpsock_kern
 # USER_TARGETS := xdpsock_user

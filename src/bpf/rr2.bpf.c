@@ -6,7 +6,7 @@
 #include <linux/types.h>
 #include <xdp/xdp_helpers.h>
 
-#define MAX_SOCKS 4
+#define MAX_SOCKS 2
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 __uint(xsk_prog_version, 1) SEC("xdp_metadata");
@@ -22,8 +22,11 @@ struct {
     __uint(XDP_PASS, 1);
 } XDP_RUN_CONFIG(acquire);
 
+static __u32 rr = 0;
+
 SEC("xdp/acquire")
 int acquire(struct xdp_md* ctx)
 {
-    return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_DROP);
+    rr = (rr + 1) & (MAX_SOCKS - 1);
+    return bpf_redirect_map(&xsks_map, rr, XDP_DROP);
 }
