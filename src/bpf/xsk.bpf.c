@@ -6,7 +6,7 @@
 #include <linux/types.h>
 #include <xdp/xdp_helpers.h>
 
-#define MAX_SOCKS 4
+#define MAX_SOCKS 16
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 __uint(xsk_prog_version, 1) SEC("xdp_metadata");

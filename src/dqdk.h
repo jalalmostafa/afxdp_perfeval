@@ -88,8 +88,8 @@ u64 clock_nsecs()
 
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 
-#define DQDK_PM_POLL (1 << 0)
-#define DQDK_PM_RTC (1 << 1)
-#define IS_THREADED(x, nbqs) (x == DQDK_PM_RTC && nbqs != 1)
-
+#define DQDK_RCV_POLL (1 << 0)
+#define DQDK_RCV_RTC (1 << 1)
+#define IS_THREADED(x, nbqs) (x == DQDK_RCV_RTC && nbqs != 1)
+#define DQDK_DURATION 3
 #endif
