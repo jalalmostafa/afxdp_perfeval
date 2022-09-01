@@ -92,4 +92,7 @@ u64 clock_nsecs()
 #define DQDK_RCV_RTC (1 << 1)
 #define IS_THREADED(x, nbqs) (x == DQDK_RCV_RTC && nbqs != 1)
 #define DQDK_DURATION 3
+
+#define is_power_of_2(x) ((x != 0) && ((x & (x - 1)) == 0))
+
 #endif

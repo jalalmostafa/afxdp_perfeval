@@ -492,8 +492,8 @@ void xsk_stats_dump(xsk_info* xsk)
 
 #define XDP_FILE_XSK "./bpf/xsk.bpf.o"
 #define XDP_FILE_RR2 "./bpf/rr2.bpf.o"
-#define XDP_FILE_RR3 "./bpf/rr3.bpf.o"
 #define XDP_FILE_RR4 "./bpf/rr4.bpf.o"
+#define XDP_FILE_RR8 "./bpf/rr8.bpf.o"
 
 int main(int argc, char** argv)
 {
@@ -654,8 +654,13 @@ int main(int argc, char** argv)
     }
 
     if (opt_shared_umem > 1) {
-        if (opt_shared_umem > 4) {
-            dlog_error("No more than 4 sockets are supported");
+        if (opt_shared_umem > 8) {
+            dlog_error("No more than 8 sockets are supported");
+            goto cleanup;
+        }
+
+        if (!is_power_of_2(opt_shared_umem)) {
+            dlog_error("Number of shared sockets should a power of 2");
             goto cleanup;
         }
 
@@ -670,15 +675,14 @@ int main(int argc, char** argv)
             case 2:
                 xdp_filename = XDP_FILE_RR2;
                 break;
-            case 3:
-                xdp_filename = XDP_FILE_RR3;
-                break;
             case 4:
                 xdp_filename = XDP_FILE_RR4;
-            case 5:
-                xdp_filename = "./bpf/rr5.bpf.c";
+                break;
+            case 8:
+                xdp_filename = XDP_FILE_RR8;
                 break;
             }
+            printf("xdp_filename %s\n", xdp_filename);
 
             for (size_t i = 0; i < nbxsks; i++) {
                 opt_queues[i] = qid;

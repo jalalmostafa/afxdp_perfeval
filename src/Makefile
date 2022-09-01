@@ -1,6 +1,8 @@
 TOOL_NAME       := dqdk
-XDP_TARGETS     := bpf/xsk.bpf bpf/rr2.bpf bpf/rr3.bpf bpf/rr4.bpf 
+XDP_TARGETS     := bpf/xsk.bpf bpf/rr2.bpf bpf/rr4.bpf bpf/rr8.bpf
 USER_TARGETS    := dqdk
+# XDP_TARGETS     := xdpsock_kern
+# USER_TARGETS    := xdpsock_user
 EXTRA_USER_DEPS := tcpip/* dlog.h dqdk.h
 TEST_FILE       := 
 
