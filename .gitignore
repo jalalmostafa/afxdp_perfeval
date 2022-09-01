@@ -67,5 +67,6 @@ dkms.conf
 *.vsix
 
 # Project-specific
-daq
+dqdk
 *.ll
+xdpsock*
