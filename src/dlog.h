@@ -3,21 +3,22 @@
 
 #include <stdio.h>
 
-#define dlog(format, vargs...)          \
-    do {                                \
-        fprintf(stderr, format, vargs); \
-    } while (0)
+#define dlogv(format, vargs...) fprintf(stdout, format, vargs)
+#define dlog(format) fprintf(stdout, format)
 
-#define dlog_error2(func, ret) dlog("[ERROR] [%s:%d] " func " (%d): %s\n", \
+#define dlog_error2(func, ret) dlogv("[ERROR] [%s:%d] " func " (%d): %s\n", \
     __FILE__, __LINE__, ret, strerror(errno));
 
-#define dlog_error(error) dlog("[ERROR] %s\n", error)
-#define dlog_errorv(errfmt, vargs...) dlog("[ERROR] " errfmt "\n", vargs)
+#define dlog_error(error) dlogv("[ERROR] %s\n", error)
+#define dlog_errorv(errfmt, vargs...) dlogv("[ERROR] " errfmt "\n", vargs)
 
-#define dlog_warn(func, ret) dlog("[WARN] [%s:%d] " func " (%d): %s\n", \
-    __FILE__, __LINE__, ret, strerror(errno));
+#define dlog_warn(func, ret) dlogv("[WARN] [%s:%d] " func " (%d): %s\n", __FILE__, __LINE__, ret, strerror(errno));
 
-#define dlog_info(info) dlog("[INFO] %s\n", info)
-#define dlog_infov(infofmt, vargs...) dlog("[INFO] " infofmt "\n", vargs)
+#define dlog_info(info) dlogv("[INFO] %s\n", info)
+#define dlog_info_head(info) dlogv("[INFO] %s", info)
+#define dlog_info_print(fmt, vargs...) dlogv(fmt, vargs)
+#define dlog_info_exit() dlog("\n")
+
+#define dlog_infov(infofmt, vargs...) dlogv("[INFO] " infofmt "\n", vargs)
 
 #endif

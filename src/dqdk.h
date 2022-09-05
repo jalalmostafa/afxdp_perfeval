@@ -3,6 +3,8 @@
 
 #include <linux/mman.h>
 #include <linux/types.h>
+#include <linux/limits.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <math.h>
@@ -42,7 +44,7 @@ always_inline int get_hugepages()
     return nb_hugepages;
 }
 
-always_inline void set_hugepages(int nb_hugepages)
+void set_hugepages(int nb_hugepages)
 {
     char buffer[HUGETLB_DIGITS] = { 0 };
 
@@ -84,6 +86,17 @@ u64 clock_nsecs()
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000000000UL + ts.tv_nsec;
+}
+
+void set_irq_affinity(int irq, int cpu)
+{
+    char mask[10] = { 0 };
+    char irq_file[PATH_MAX] = { 0 };
+    snprintf(irq_file, 30, "/proc/irq/%d/smp_affinity", irq);
+    snprintf(mask, 10, "%d", 1 << cpu);
+    int fd = open(irq_file, O_RDWR);
+    write(fd, mask, strlen(mask));
+    close(fd);
 }
 
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))

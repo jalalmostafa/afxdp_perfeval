@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+#define _GNU_SOURCE
+
 #include <arpa/inet.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -17,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/signal.h>
+#include <sys/sysinfo.h>
 #include <unistd.h>
 #include <xdp/libxdp.h>
 #include <xdp/xsk.h>
@@ -29,7 +32,7 @@
 #define UMEM_LEN (1024 * 4)
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 
-#define MAX_SOCKS 4
+#define MAX_QUEUES 16
 #define UMEM_SIZE (UMEM_LEN * FRAME_SIZE)
 #define FILLQ_LEN (XSK_RING_PROD__DEFAULT_NUM_DESCS * 2)
 #define COMPQ_LEN XSK_RING_CONS__DEFAULT_NUM_DESCS
@@ -156,7 +159,7 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
 {
     int ret = 0;
     u32 nbxsks = xsk->umem_info->count;
-    printf("**** xsk_configure: nbxsks in umem: %d\n", nbxsks);
+    printf("***** xsk_configure: nbxsks in umem: %d\n", nbxsks);
     const struct xsk_socket_config xsk_config = {
         .rx_size = FILLQ_LEN,
         .tx_size = COMPQ_LEN,
@@ -208,7 +211,7 @@ void log_pingpong(struct iphdr* packet)
 {
     __u32 saddr = ntohl(packet->saddr);
     __u32 daddr = ntohl(packet->daddr);
-    dlog("[PING]: %i.%i.%i.%i is pinging %i.%i.%i.%i\n", (saddr >> 24) & 0xFF,
+    dlogv("[PING]: %i.%i.%i.%i is pinging %i.%i.%i.%i\n", (saddr >> 24) & 0xFF,
         (saddr >> 16) & 0xFF, (saddr >> 8) & 0xFF, saddr & 0xFF,
         (daddr >> 24) & 0xFF, (daddr >> 16) & 0xFF, (daddr >> 8) & 0xFF,
         daddr & 0xFF);
@@ -217,7 +220,7 @@ void log_pingpong(struct iphdr* packet)
 void log_frame(struct ethhdr* frame)
 {
     int ethertype = ntohs(frame->h_proto);
-    dlog("[SRC MAC] %02X:%02X:%02X:%02X:%02X:%02X - [DST MAC] %02X:%02X:%02X:%02X:%02X:%02X - [PROTO] 0x%04X\n",
+    dlogv("[SRC MAC] %02X:%02X:%02X:%02X:%02X:%02X - [DST MAC] %02X:%02X:%02X:%02X:%02X:%02X - [PROTO] 0x%04X\n",
         frame->h_source[0], frame->h_source[1], frame->h_source[2], frame->h_source[3], frame->h_source[4], frame->h_source[5],
         frame->h_dest[0], frame->h_dest[1], frame->h_dest[2], frame->h_dest[3], frame->h_dest[4], frame->h_dest[5], ethertype);
 }
@@ -497,11 +500,11 @@ void xsk_stats_dump(xsk_info* xsk)
 
 int main(int argc, char** argv)
 {
-    // timer_t timer;
-    int ifindex, ret, opt;
+
     char* opt_ifname = NULL;
     enum xdp_attach_mode opt_mode = XDP_MODE_NATIVE;
-    u32 opt_batchsize = 64, opt_queues[MAX_SOCKS] = { -1 }, opt_shared_umem = 0;
+    u32 opt_batchsize = 64, opt_queues[MAX_QUEUES] = { -1 },
+        opt_irqs[MAX_QUEUES] = { -1 }, opt_shared_umem = 0;
     struct itimerspec opt_duration = {
         .it_interval.tv_sec = DQDK_DURATION,
         .it_interval.tv_nsec = 0,
@@ -509,21 +512,48 @@ int main(int argc, char** argv)
         .it_value.tv_nsec = 0
     };
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1,
-       opt_transportmode = IPPROTO_UDP, opt_pollmode = DQDK_RCV_POLL;
+       opt_transportmode = IPPROTO_UDP, opt_pollmode = DQDK_RCV_POLL,
+       opt_affinity = 0;
 
-    struct xdp_options xdp_opts;
-    socklen_t socklen;
+    int ifindex, ret, opt;
+    u32 nbqueues = 0, nbirqs = 0, nprocs = get_nprocs();
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
-    u32 nbqueues = 0;
+    struct xdp_options xdp_opts;
     char* xdp_filename = XDP_FILE_XSK;
+    timer_t timer;
+    socklen_t socklen;
+    cpu_set_t cpuset;
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     signal(SIGABRT, signal_handler);
-    // signal(SIGUSR1, signal_handler);
+    signal(SIGUSR1, signal_handler);
 
-    while ((opt = getopt(argc, argv, "b:cd:i:l:m:p:q:s:vw")) != -1) {
+    while ((opt = getopt(argc, argv, "a:b:cd:i:l:m:p:q:s:vw")) != -1) {
         switch (opt) {
+        case 'a':
+            // mapping to queues is 1-to-1 e.g. first irq to first queue...
+            opt_affinity = 1;
+            if (strchr(optarg, ',') == NULL) {
+                nbirqs = 1;
+                opt_irqs[0] = atoi(optarg);
+            } else {
+                char *delimiter = NULL, *cursor = optarg;
+                u32 irq = -1;
+                do {
+                    irq = strtol(cursor, &delimiter, 10);
+                    if (errno != 0
+                        || cursor == delimiter
+                        || (delimiter[0] != ',' && delimiter[0] != '\0')) {
+                        dlog_error("Invalid IRQ string");
+                        goto cleanup;
+                    }
+
+                    cursor = delimiter + 1;
+                    opt_irqs[nbirqs++] = irq;
+                } while (delimiter[0] != '\0');
+            }
+            break;
         case 'd':
             opt_duration.it_interval.tv_sec = atoi(optarg);
             opt_duration.it_interval.tv_nsec = 0;
@@ -541,16 +571,16 @@ int main(int argc, char** argv)
             } else {
                 char* delimiter = NULL;
                 u32 start = strtol(optarg, &delimiter, 10), end;
-                if (delimiter != NULL) {
+                if (delimiter != optarg) {
                     end = strtol(++delimiter, &delimiter, 10);
                 } else {
-                    dlog_error("Invalid queue range");
+                    dlog_error("Invalid queue range. Accepted: 1,2,3 or 1");
                     exit(EXIT_FAILURE);
                 }
 
                 nbqueues = (end - start) + 1;
-                if (nbqueues > MAX_SOCKS) {
-                    dlog_errorv("Too many queues. Maximum is %d", MAX_SOCKS);
+                if (nbqueues > MAX_QUEUES) {
+                    dlog_errorv("Too many queues. Maximum is %d", MAX_QUEUES);
                     exit(EXIT_FAILURE);
                 }
 
@@ -610,6 +640,28 @@ int main(int argc, char** argv)
         }
     }
 
+    if (opt_ifname == NULL || nbqueues == 0) {
+        dlog_error("Invalid interface name or number of queues");
+        goto cleanup;
+    }
+
+    if (opt_affinity) {
+        if (opt_pollmode != DQDK_RCV_RTC) {
+            dlog_error("IRQ and thread affinity is only possible in RTC mode using command option: -p rtc ");
+            goto cleanup;
+        }
+
+        if (nbirqs != nbqueues) {
+            dlog_error("IRQs and number of queues must be equal");
+            goto cleanup;
+        }
+
+        if (nbirqs != nprocs) {
+            dlog_error("IRQs and number of processors must be equal");
+            goto cleanup;
+        }
+    }
+
     switch (opt_mode) {
     case XDP_MODE_SKB:
         dlog_info("XDP generic mode is chosen.");
@@ -645,7 +697,7 @@ int main(int argc, char** argv)
     }
 
     u32 nbxsks = opt_shared_umem > 1 ? opt_shared_umem : nbqueues;
-    char queues[4 * MAX_SOCKS] = { 0 };
+    char queues[4 * MAX_QUEUES] = { 0 };
     char* queues_format = queues;
     for (u32 i = 0; i < nbqueues; i++) {
         ret = (i == nbqueues - 1) ? snprintf(queues_format, 2, "%d", opt_queues[i])
@@ -695,6 +747,18 @@ int main(int argc, char** argv)
         dlog_infov("Working %d XSKs on queues: %s", nbqueues, queues);
     }
 
+    if (opt_affinity && opt_pollmode == DQDK_RCV_RTC) {
+        dlog_info_head("IRQ-to-Queue Mappings: ");
+        for (size_t i = 0; i < nbirqs; i++) {
+            if (i != nbirqs - 1) {
+                dlog_info_print("%d-%d, ", opt_irqs[i], opt_queues[i]);
+            } else {
+                dlog_info_print("%d-%d", opt_irqs[i], opt_queues[i]);
+            }
+        }
+        dlog_info_exit();
+    }
+
     if ((ret = setrlimit(RLIMIT_MEMLOCK, &rlim))) {
         dlog_error2("setrlimit", ret);
         goto cleanup;
@@ -711,8 +775,10 @@ int main(int argc, char** argv)
     int mapfd = bpf_object__find_map_fd_by_name(obj, "xsks_map");
 
     pthread_t* xsk_workers = NULL;
+    pthread_attr_t* xsk_worker_attrs = NULL;
     if (IS_THREADED(opt_pollmode, nbqueues)) {
         xsk_workers = (pthread_t*)calloc(nbxsks, sizeof(pthread_t));
+        xsk_worker_attrs = (pthread_attr_t*)calloc(nbxsks, sizeof(pthread_attr_t));
     }
     xsk_info* xsks = (xsk_info*)calloc(nbxsks, sizeof(xsk_info));
     umem_info* shared_umem = NULL;
@@ -722,13 +788,13 @@ int main(int argc, char** argv)
         umem_configure(shared_umem);
     }
 
-    // struct sigevent sigv;
-    // sigv.sigev_notify = SIGEV_SIGNAL;
-    // sigv.sigev_signo = SIGUSR1;
-    // timer_create(CLOCK_MONOTONIC, &sigv, &timer);
-    // timer_settime(timer, 0, &opt_duration, NULL);
+    struct sigevent sigv;
+    sigv.sigev_notify = SIGEV_SIGNAL;
+    sigv.sigev_signo = SIGUSR1;
+    timer_create(CLOCK_MONOTONIC, &sigv, &timer);
+    timer_settime(timer, 0, &opt_duration, NULL);
 
-    printf("**** sockets %d, shared_umem %d, nbqueus %d\n", nbxsks, opt_shared_umem, nbqueues);
+    printf("***** sockets %d, shared_umem %d, nbqueus %d\n", nbxsks, opt_shared_umem, nbqueues);
     for (u32 i = 0; i < nbxsks; i++) {
         xsks[i].batch_size = opt_batchsize;
         xsks[i].libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
@@ -786,7 +852,22 @@ int main(int argc, char** argv)
                 .count = 1,
                 .shared_umem = opt_shared_umem,
             };
-            pthread_create(&xsk_workers[i], NULL, poll_rx, (void*)&ctx);
+
+            pthread_attr_init(&xsk_worker_attrs[i]);
+            if (opt_affinity) {
+                // Set process and interrupt affinity to same CPU
+                int cpu = i % nprocs;
+                set_irq_affinity(opt_irqs[i], cpu);
+                CPU_ZERO(&cpuset);
+                CPU_SET(cpu, &cpuset);
+                ret = pthread_attr_setaffinity_np(
+                    &xsk_worker_attrs[i], sizeof(cpu_set_t), &cpuset);
+                if (ret) {
+                    dlog_error2("pthread_attr_setaffinity_np", ret);
+                }
+            }
+
+            pthread_create(&xsk_workers[i], &xsk_worker_attrs[i], poll_rx, (void*)&ctx);
         }
     }
 
@@ -832,7 +913,7 @@ int main(int argc, char** argv)
         stats_dump(&avg_stats);
     }
 cleanup:
-    // timer_delete(timer);
+    timer_delete(timer);
     xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
     xdp_program__close(kern_prog);
 
@@ -847,7 +928,18 @@ cleanup:
             }
         }
         free(xsks);
-        free(xsk_workers);
+
+        if (xsk_workers != NULL) {
+            free(xsk_workers);
+        }
+
+        if (xsk_worker_attrs != NULL) {
+            for (size_t i = 0; i < nbxsks; i++) {
+                pthread_attr_destroy(&xsk_worker_attrs[i]);
+            }
+
+            free(xsk_worker_attrs);
+        }
     }
 
     if (opt_shared_umem) {
