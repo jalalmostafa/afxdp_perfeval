@@ -302,12 +302,14 @@ always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len)
         return NULL;
     }
 
-    struct udphdr* udp = (struct udphdr*)(((u8*)packet) + ip4_get_header_size(packet));
-    u32 udplen = ntohs(packet->tot_len) - ip4_get_header_size(packet);
+    u32 iphdrsz = ip4_get_header_size(packet);
+    u32 udplen = ntohs(packet->tot_len) - iphdrsz;
+    struct udphdr* udp = (struct udphdr*)(((u8*)packet) + iphdrsz);
     if (!udp_audit(udp, packet->saddr, packet->daddr, udplen)) {
         xsk->stats.invalid_udp_pkts++;
         return NULL;
     }
+
     return (u8*)(udp + 1);
 }
 
@@ -342,8 +344,8 @@ always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
 
     for (int i = 0; i < rcvd; i++) {
         u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
-        addr = xsk_umem__add_offset_to_addr(addr);
         // u64 orig = xsk_umem__extract_addr(addr);
+        // addr = xsk_umem__add_offset_to_addr(addr);
 
 #ifdef RX_DROP
         xsk_umem__get_data(umem->buffer, addr);
@@ -355,6 +357,7 @@ always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
         (void)data;
 #endif
         idx_rx++;
+        // *xsk_ring_prod__fill_addr(fq, idx_fq) = orig;
         idx_fq++;
     }
 
@@ -664,13 +667,13 @@ int main(int argc, char** argv)
 
     switch (opt_mode) {
     case XDP_MODE_SKB:
-        dlog_info("XDP generic mode is chosen.");
+        dlog_info("XDP generic mode is activated.");
         break;
     case XDP_MODE_NATIVE:
-        dlog_info("XDP driver mode is chosen.");
+        dlog_info("XDP driver mode is activated.");
         break;
     case XDP_MODE_HW:
-        dlog_info("XDP HW-Offloading is chosen.");
+        dlog_info("XDP HW-Offloading is activated.");
         break;
     default:
         break;
