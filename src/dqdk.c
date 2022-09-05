@@ -125,7 +125,11 @@ static int umem_configure(umem_info* umem)
         .comp_size = COMPQ_LEN,
         .frame_size = XSK_UMEM__DEFAULT_FRAME_SIZE,
         .frame_headroom = XSK_UMEM__DEFAULT_FRAME_HEADROOM,
-        .flags = 0 // XDP_UMEM_UNALIGNED_CHUNK_FLAG
+#ifdef UMEM_UNALIGNED
+        .flags = XDP_UMEM_UNALIGNED_CHUNK_FLAG
+#else
+        .flags = 0
+#endif
     };
 
     ret = xsk_umem__create(&umem->umem, umem->buffer, UMEM_SIZE,
@@ -344,8 +348,10 @@ always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
 
     for (int i = 0; i < rcvd; i++) {
         u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
-        // u64 orig = xsk_umem__extract_addr(addr);
-        // addr = xsk_umem__add_offset_to_addr(addr);
+#ifdef UMEM_UNALIGNED
+        u64 orig = xsk_umem__extract_addr(addr);
+        addr = xsk_umem__add_offset_to_addr(addr);
+#endif
 
 #ifdef RX_DROP
         xsk_umem__get_data(umem->buffer, addr);
@@ -357,7 +363,9 @@ always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
         (void)data;
 #endif
         idx_rx++;
-        // *xsk_ring_prod__fill_addr(fq, idx_fq) = orig;
+#ifdef UMEM_UNALIGNED
+        *xsk_ring_prod__fill_addr(fq, idx_fq) = orig;
+#endif
         idx_fq++;
     }
 

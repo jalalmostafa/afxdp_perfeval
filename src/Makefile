@@ -11,8 +11,9 @@ USER_LIBS       := -lpthread
 MAN_PAGE        :=
 
 ## add DEFINES=-Dflag to make to build daq with some flag where flag can be:
-##    NO_HGPG        Disable Hugepages
-##    RX_DROP        No L3/L4 checksumming
+##    NO_HGPG           Disable Hugepages
+##    RX_DROP           No L3/L4 checksumming
+##    UMEM_UNALIGNED    Use unaligned memory
 ##
 DEFINES         := -DRX_DROP
 CFLAGS          += -g -std=gnu11 -I$(realpath .) $(DEFINES)
