@@ -29,12 +29,14 @@
 #include "tcpip/ipv4.h"
 #include "tcpip/udp.h"
 
-#define UMEM_LEN (1024 * 4)
+#define UMEM_FACTOR 1
+#define UMEM_BASE (XSK_RING_PROD__DEFAULT_NUM_DESCS * 2)
+#define UMEM_LEN (UMEM_BASE * UMEM_FACTOR)
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 
 #define MAX_QUEUES 16
 #define UMEM_SIZE (UMEM_LEN * FRAME_SIZE)
-#define FILLQ_LEN (XSK_RING_PROD__DEFAULT_NUM_DESCS * 2)
+#define FILLQ_LEN UMEM_LEN
 #define COMPQ_LEN XSK_RING_CONS__DEFAULT_NUM_DESCS
 
 struct xsk_stat {
@@ -54,7 +56,7 @@ typedef struct {
     struct xsk_umem* umem;
     struct xsk_ring_prod* fill_ring;
     struct xsk_ring_cons* comp_ring;
-    u32 count;
+    u32 nbfqs;
     void* buffer;
 } umem_info;
 
@@ -74,37 +76,38 @@ typedef struct {
 
 u32 break_flag = 0;
 
-static void* umem_buffer_create()
+static void* umem_buffer_create(u32 factor)
 {
 #ifdef NO_HGPG
     return mmap(NULL, UMEM_SIZE, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #else
-    return huge_malloc(UMEM_SIZE);
+    printf("***** UMEM_SIZE (%d) * factor (%d) = %d\n", UMEM_SIZE, factor, UMEM_SIZE * factor);
+    return huge_malloc(UMEM_SIZE * factor);
 #endif
 }
 
-static umem_info* umem_info_create(u32 count)
+static umem_info* umem_info_create(u32 nbfqs)
 {
     umem_info* info = (umem_info*)calloc(1, sizeof(umem_info));
 
-    info->buffer = umem_buffer_create();
+    info->buffer = umem_buffer_create(nbfqs);
     if (info->buffer == NULL) {
         dlog_error2("umem_buffer_create", 0);
         return NULL;
     }
 
     info->umem = NULL;
-    info->count = count;
-    info->comp_ring = (struct xsk_ring_cons*)calloc(info->count, sizeof(struct xsk_ring_cons));
-    info->fill_ring = (struct xsk_ring_prod*)calloc(info->count, sizeof(struct xsk_ring_prod));
+    info->nbfqs = nbfqs;
+    info->comp_ring = (struct xsk_ring_cons*)calloc(info->nbfqs, sizeof(struct xsk_ring_cons));
+    info->fill_ring = (struct xsk_ring_prod*)calloc(info->nbfqs, sizeof(struct xsk_ring_prod));
     return info;
 }
 
 static void umem_info_free(umem_info* info)
 {
     if (info != NULL) {
-        munmap(info->buffer, UMEM_SIZE);
+        munmap(info->buffer, UMEM_SIZE * info->nbfqs);
         free(info->fill_ring);
         free(info->comp_ring);
         xsk_umem__delete(info->umem);
@@ -120,6 +123,7 @@ static int umem_configure(umem_info* umem)
         return EINVAL;
     }
 
+    // FIXME: fill size nbfqs
     const struct xsk_umem_config cfg = {
         .fill_size = FILLQ_LEN,
         .comp_size = COMPQ_LEN,
@@ -139,31 +143,14 @@ static int umem_configure(umem_info* umem)
         return ret;
     }
 
-    for (size_t fqi = 0; fqi < umem->count; fqi++) {
-        // push all frames to fill ring
-        u32 idx;
-        ret = xsk_ring_prod__reserve(&umem->fill_ring[fqi], FILLQ_LEN, &idx);
-        if (ret != FILLQ_LEN) {
-            dlog_error2("xsk_ring_prod__reserve", ret);
-            return EIO;
-        }
-
-        // fill addresses
-        u32 base = fqi * UMEM_SIZE;
-        for (int i = 0; i < FILLQ_LEN; i++) {
-            *xsk_ring_prod__fill_addr(&umem->fill_ring[fqi], idx++) = base + (i * FRAME_SIZE);
-        }
-
-        xsk_ring_prod__submit(&umem->fill_ring[fqi], FILLQ_LEN);
-    }
     return 0;
 }
 
 static int xsk_configure(xsk_info* xsk, const char* ifname)
 {
     int ret = 0;
-    u32 nbxsks = xsk->umem_info->count;
-    printf("***** xsk_configure: nbxsks in umem: %d\n", nbxsks);
+    u32 nbfqs = xsk->umem_info->nbfqs;
+    printf("***** xsk_configure: fqs in umem: %d\n", nbfqs);
     const struct xsk_socket_config xsk_config = {
         .rx_size = FILLQ_LEN,
         .tx_size = COMPQ_LEN,
@@ -172,10 +159,10 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
         .xdp_flags = xsk->xdp_flags
     };
 
-    struct xsk_ring_prod* fq = nbxsks == 1 ? &xsk->umem_info->fill_ring[0]
-                                           : &xsk->umem_info->fill_ring[xsk->index];
-    struct xsk_ring_cons* cq = nbxsks == 1 ? &xsk->umem_info->comp_ring[0]
-                                           : &xsk->umem_info->comp_ring[xsk->index];
+    struct xsk_ring_prod* fq = nbfqs == 1 ? &xsk->umem_info->fill_ring[0]
+                                          : &xsk->umem_info->fill_ring[xsk->index];
+    struct xsk_ring_cons* cq = nbfqs == 1 ? &xsk->umem_info->comp_ring[0]
+                                          : &xsk->umem_info->comp_ring[xsk->index];
 
     ret = xsk_socket__create_shared(&xsk->socket, ifname, xsk->queue_id,
         xsk->umem_info->umem, &xsk->rx, NULL, fq, cq, &xsk_config);
@@ -211,78 +198,29 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
     return 0;
 }
 
-void log_pingpong(struct iphdr* packet)
+// FIXME: nfqs?
+static int fq_ring_configure(xsk_info* xsk)
 {
-    __u32 saddr = ntohl(packet->saddr);
-    __u32 daddr = ntohl(packet->daddr);
-    dlogv("[PING]: %i.%i.%i.%i is pinging %i.%i.%i.%i\n", (saddr >> 24) & 0xFF,
-        (saddr >> 16) & 0xFF, (saddr >> 8) & 0xFF, saddr & 0xFF,
-        (daddr >> 24) & 0xFF, (daddr >> 16) & 0xFF, (daddr >> 8) & 0xFF,
-        daddr & 0xFF);
-}
+    // push all frames to fill ring
+    u32 idx, ret, nbfqs = xsk->umem_info->nbfqs,
+                  fqlen = FILLQ_LEN;
+    struct xsk_ring_prod* fq = nbfqs == 1 ? &xsk->umem_info->fill_ring[0]
+                                          : &xsk->umem_info->fill_ring[xsk->index];
+    ret = xsk_ring_prod__reserve(fq, fqlen, &idx);
+    if (ret != fqlen) {
+        dlog_error2("xsk_ring_prod__reserve", ret);
+        return EIO;
+    }
 
-void log_frame(struct ethhdr* frame)
-{
-    int ethertype = ntohs(frame->h_proto);
-    dlogv("[SRC MAC] %02X:%02X:%02X:%02X:%02X:%02X - [DST MAC] %02X:%02X:%02X:%02X:%02X:%02X - [PROTO] 0x%04X\n",
-        frame->h_source[0], frame->h_source[1], frame->h_source[2], frame->h_source[3], frame->h_source[4], frame->h_source[5],
-        frame->h_dest[0], frame->h_dest[1], frame->h_dest[2], frame->h_dest[3], frame->h_dest[4], frame->h_dest[5], ethertype);
-}
+    // fill addresses
+    u32 base = nbfqs != 1 ? xsk->index * UMEM_SIZE : 0;
+    printf("***** xsk %d is being configured with base %d\n", xsk->index, base);
+    for (u32 i = 0; i < fqlen; i++) {
+        *xsk_ring_prod__fill_addr(fq, idx++) = base + (i * FRAME_SIZE);
+    }
 
-struct reply {
-    struct icmphdr hdr;
-    u8 buffer[56];
-};
-
-u8 pong_reply[FRAME_SIZE];
-
-u8* construct_pong(struct ethhdr* frame, u32 len)
-{
-    struct iphdr* packet = (struct iphdr*)(frame + 1);
-    struct icmphdr* icmp = (struct icmphdr*)(packet + 1);
-    u8* data = (u8*)(icmp + 1);
-
-    int datalen = len - sizeof(struct ethhdr) - sizeof(struct iphdr) - sizeof(struct icmphdr);
-
-    memset(pong_reply, 0, FRAME_SIZE);
-    int icmplen = sizeof(struct icmphdr) + datalen;
-
-    struct icmphdr* pong = (struct icmphdr*)(pong_reply + sizeof(struct ethhdr) + sizeof(struct iphdr));
-    pong->type = ICMP_ECHOREPLY;
-    pong->code = 0;
-    pong->checksum = 0;
-    pong->un.echo.id = icmp->un.echo.id;
-    pong->un.echo.sequence = icmp->un.echo.sequence;
-    memcpy((void*)(pong + 1), data, datalen);
-    pong->checksum = ip_fast_csum(pong, 2 + ceil(datalen / 4));
-
-    struct iphdr* pong_packet = (struct iphdr*)(pong_reply + sizeof(struct ethhdr));
-    pong_packet->daddr = packet->saddr;
-    pong_packet->saddr = packet->daddr;
-    pong_packet->protocol = IPPROTO_ICMP;
-    pong_packet->ihl = 5;
-    pong_packet->version = 4;
-    pong_packet->ttl = 64;
-
-    int pktlen = sizeof(struct iphdr) + icmplen;
-    pong_packet->tot_len = htons(pktlen);
-    pong_packet->tos = packet->tos;
-    pong_packet->check = ip_fast_csum(pong_packet, pong_packet->ihl);
-
-    struct ethhdr* pong_frame = (struct ethhdr*)pong_reply;
-    memcpy(pong_frame->h_dest, frame->h_source, ETH_ALEN);
-    memcpy(pong_frame->h_source, frame->h_dest, ETH_ALEN);
-    pong_frame->h_proto = frame->h_proto;
-
-    return pong_reply;
-}
-
-void log_icmp(u8* frame)
-{
-    struct ethhdr* framehdr = (struct ethhdr*)frame;
-    struct iphdr* packet = (struct iphdr*)(((struct ethhdr*)framehdr) + 1);
-    log_frame(framehdr);
-    log_pingpong(packet);
+    xsk_ring_prod__submit(fq, fqlen);
+    return 0;
 }
 
 always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len)
@@ -320,7 +258,7 @@ always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len)
 always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
 {
     u32 idx_rx = 0, idx_fq = 0;
-    struct xsk_ring_prod* fq = umem->count == 1 ? umem->fill_ring : &umem->fill_ring[xsk->index];
+    struct xsk_ring_prod* fq = umem->nbfqs == 1 ? umem->fill_ring : &umem->fill_ring[xsk->index];
 
     int rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
 
@@ -329,6 +267,7 @@ always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
             xsk->stats.rx_empty_polls++;
             recvfrom(xsk_socket__fd(xsk->socket), NULL, 0, MSG_DONTWAIT, NULL, NULL);
         }
+
         return ECOMM;
     }
 
@@ -358,8 +297,8 @@ always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
 #else
         u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
         u8* frame = xsk_umem__get_data(umem->buffer, addr);
-
         u8* data = process_frame(xsk, frame, len);
+
         (void)data;
 #endif
         idx_rx++;
@@ -387,6 +326,7 @@ struct rx_ctx {
 };
 
 #define POLL_TIMEOUT 1000
+
 void* poll_rx(void* rxctx_ptr)
 {
     struct rx_ctx* ctx = (struct rx_ctx*)rxctx_ptr;
@@ -415,7 +355,7 @@ void* poll_rx(void* rxctx_ptr)
                 continue;
             } else {
                 for (size_t i = 0; i < ctx->count; i++) {
-                    xdp_udpip(&xsks[i], xsks[i].umem_info);
+                    ret = xdp_udpip(&xsks[i], xsks[i].umem_info);
                 }
             }
         }
@@ -511,7 +451,11 @@ void xsk_stats_dump(xsk_info* xsk)
 
 int main(int argc, char** argv)
 {
-
+#ifdef RX_DROP
+    dlog_info("RX_DROP Compilation!");
+#else
+    dlog_info("UDP Compilation!");
+#endif
     char* opt_ifname = NULL;
     enum xdp_attach_mode opt_mode = XDP_MODE_NATIVE;
     u32 opt_batchsize = 64, opt_queues[MAX_QUEUES] = { -1 },
@@ -529,9 +473,11 @@ int main(int argc, char** argv)
     int ifindex, ret, opt;
     u32 nbqueues = 0, nbirqs = 0, nprocs = get_nprocs();
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
+    struct xdp_program* kern_prog = NULL;
     struct xdp_options xdp_opts;
     char* xdp_filename = XDP_FILE_XSK;
-    timer_t timer;
+    xsk_info* xsks = NULL;
+    // timer_t timer;
     socklen_t socklen;
     cpu_set_t cpuset;
 
@@ -775,7 +721,7 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    struct xdp_program* kern_prog = xdp_program__open_file(xdp_filename, NULL, NULL);
+    kern_prog = xdp_program__open_file(xdp_filename, NULL, NULL);
     ret = xdp_program__attach(kern_prog, ifindex, opt_mode, 0);
     if (ret) {
         dlog_error2("xdp_program__attach", ret);
@@ -791,28 +737,34 @@ int main(int argc, char** argv)
         xsk_workers = (pthread_t*)calloc(nbxsks, sizeof(pthread_t));
         xsk_worker_attrs = (pthread_attr_t*)calloc(nbxsks, sizeof(pthread_attr_t));
     }
-    xsk_info* xsks = (xsk_info*)calloc(nbxsks, sizeof(xsk_info));
+
+    xsks = (xsk_info*)calloc(nbxsks, sizeof(xsk_info));
     umem_info* shared_umem = NULL;
 
-    if (opt_shared_umem) {
-        shared_umem = IS_THREADED(opt_pollmode, nbqueues) ? umem_info_create(nbxsks) : umem_info_create(1);
+    if (opt_shared_umem > 1) {
+        printf("***** shared_umem (%d) = nbqueues (%d) != 1 ? umem_info_create(nbxsks (%d)) : umem_info_create(1)\n", opt_shared_umem, nbqueues, nbxsks);
+        shared_umem = nbqueues != 1 ? umem_info_create(nbxsks) : umem_info_create(1);
+        printf("***** before umem_configure(shared_umem);\n");
         umem_configure(shared_umem);
+        printf("***** after umem_configure(shared_umem);\n");
     }
 
-    struct sigevent sigv;
-    sigv.sigev_notify = SIGEV_SIGNAL;
-    sigv.sigev_signo = SIGUSR1;
-    timer_create(CLOCK_MONOTONIC, &sigv, &timer);
-    timer_settime(timer, 0, &opt_duration, NULL);
+    // struct sigevent sigv;
+    // sigv.sigev_notify = SIGEV_SIGNAL;
+    // sigv.sigev_signo = SIGUSR1;
+    // timer_create(CLOCK_MONOTONIC, &sigv, &timer);
+    // timer_settime(timer, 0, &opt_duration, NULL);
 
     printf("***** sockets %d, shared_umem %d, nbqueus %d\n", nbxsks, opt_shared_umem, nbqueues);
     for (u32 i = 0; i < nbxsks; i++) {
+
         xsks[i].batch_size = opt_batchsize;
         xsks[i].libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
         xsks[i].bind_flags = (opt_zcopy ? XDP_ZEROCOPY : XDP_COPY)
             | (opt_needs_wakeup ? XDP_USE_NEED_WAKEUP : 0);
 
-        if (i != 0 && opt_shared_umem) {
+        if (i != 0 && opt_shared_umem > 1) {
+            printf("***** xsks[%d].bind_flags = XDP_SHARED_UMEM\n", i);
             xsks[i].bind_flags = XDP_SHARED_UMEM;
         }
 
@@ -820,7 +772,7 @@ int main(int argc, char** argv)
         xsks[i].queue_id = opt_queues[i];
         xsks[i].index = i;
 
-        if (opt_shared_umem) {
+        if (opt_shared_umem > 1) {
             xsks[i].umem_info = shared_umem;
         } else {
             xsks[i].umem_info = umem_info_create(1);
@@ -831,6 +783,28 @@ int main(int argc, char** argv)
         if (ret) {
             dlog_error2("xsk_configure", ret);
             goto cleanup;
+        }
+
+        if (opt_shared_umem > 1) {
+            if (i == 0) {
+                ret = fq_ring_configure(&xsks[i]);
+                if (ret) {
+                    dlog_error2("fq_ring_configure", ret);
+                    goto cleanup;
+                }
+            } else {
+                ret = fq_ring_configure(&xsks[i]);
+                if (ret) {
+                    dlog_error2("fq_ring_configure", ret);
+                    goto cleanup;
+                }
+            }
+        } else {
+            ret = fq_ring_configure(&xsks[i]);
+            if (ret) {
+                dlog_error2("fq_ring_configure", ret);
+                goto cleanup;
+            }
         }
 
         u32 sockfd = xsk_socket__fd(xsks[i].socket);
@@ -924,7 +898,7 @@ int main(int argc, char** argv)
         stats_dump(&avg_stats);
     }
 cleanup:
-    timer_delete(timer);
+    // timer_delete(timer);
     xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
     xdp_program__close(kern_prog);
 

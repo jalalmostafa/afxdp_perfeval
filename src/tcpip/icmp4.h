@@ -48,4 +48,30 @@ always_inline int icmp4_pong(struct ethhdr* frame, u32 len, u8* pong_reply)
     return 0;
 }
 
+void log_frame(struct ethhdr* frame)
+{
+    int ethertype = ntohs(frame->h_proto);
+    dlogv("[SRC MAC] %02X:%02X:%02X:%02X:%02X:%02X - [DST MAC] %02X:%02X:%02X:%02X:%02X:%02X - [PROTO] 0x%04X\n",
+        frame->h_source[0], frame->h_source[1], frame->h_source[2], frame->h_source[3], frame->h_source[4], frame->h_source[5],
+        frame->h_dest[0], frame->h_dest[1], frame->h_dest[2], frame->h_dest[3], frame->h_dest[4], frame->h_dest[5], ethertype);
+}
+
+void log_pingpong(struct iphdr* packet)
+{
+    __u32 saddr = ntohl(packet->saddr);
+    __u32 daddr = ntohl(packet->daddr);
+    dlogv("[PING]: %i.%i.%i.%i is pinging %i.%i.%i.%i\n", (saddr >> 24) & 0xFF,
+        (saddr >> 16) & 0xFF, (saddr >> 8) & 0xFF, saddr & 0xFF,
+        (daddr >> 24) & 0xFF, (daddr >> 16) & 0xFF, (daddr >> 8) & 0xFF,
+        daddr & 0xFF);
+}
+
+void log_icmp(u8* frame)
+{
+    struct ethhdr* framehdr = (struct ethhdr*)frame;
+    struct iphdr* packet = (struct iphdr*)(((struct ethhdr*)framehdr) + 1);
+    log_frame(framehdr);
+    log_pingpong(packet);
+}
+
 #endif
