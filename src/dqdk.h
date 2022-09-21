@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <math.h>
+#include <ctype.h>
 
 #include "dlog.h"
 
@@ -16,7 +17,7 @@ typedef __u16 u16;
 typedef __u32 u32;
 typedef __u64 u64;
 
-#define always_inline inline __attribute__((always_inline))
+#define always_inline // inline __attribute__((always_inline))
 
 #define HUGEPAGE_2MB_SIZE 2097152
 #define HUGETLB_PATH "/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages"
@@ -88,7 +89,7 @@ u64 clock_nsecs()
     return ts.tv_sec * 1000000000UL + ts.tv_nsec;
 }
 
-void set_irq_affinity(int irq, int cpu)
+void nic_set_irq_affinity(int irq, int cpu)
 {
     char mask[10] = { 0 };
     char irq_file[PATH_MAX] = { 0 };
@@ -97,6 +98,52 @@ void set_irq_affinity(int irq, int cpu)
     int fd = open(irq_file, O_RDWR);
     write(fd, mask, strlen(mask));
     close(fd);
+}
+
+typedef struct {
+    u32 irq;
+    u32 interrupts;
+} irq_interrupts_t;
+
+typedef struct {
+    u32 nbirqs;
+    irq_interrupts_t* interrupts;
+} interrupts_t;
+
+interrupts_t* nic_get_interrupts(char* ifname, u32 nprocs)
+{
+    char *line = NULL, *cursor = NULL;
+    u32 idx = 0, current_irq, current_interrupts = 0, procs = 0;
+    size_t linesz = 0;
+    interrupts_t* intrpts = (interrupts_t*)calloc(1, sizeof(interrupts_t));
+    intrpts->nbirqs = nprocs;
+    intrpts->interrupts = (irq_interrupts_t*)calloc(nprocs, sizeof(irq_interrupts_t));
+    FILE* fp = fopen("/proc/interrupts", "r");
+
+    while (getline(&line, &linesz, fp) != -1 && idx != nprocs - 1) {
+        if (strstr(line, ifname) == NULL)
+            continue;
+
+        current_irq = strtol(line, &cursor, 10);
+
+        while (procs != nprocs) {
+            while (!isdigit(cursor))
+                ++cursor;
+
+            current_interrupts += strtol(line, &cursor, 10);
+            ++procs;
+        }
+        intrpts->interrupts[idx].irq = current_irq;
+        intrpts->interrupts[idx].interrupts = current_interrupts;
+        printf("irq %d interrupts %d\n", current_irq, current_interrupts);
+
+        procs = 0;
+        idx++;
+    }
+    free(line);
+    fclose(fp);
+
+    return intrpts;
 }
 
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))

@@ -29,9 +29,7 @@
 #include "tcpip/ipv4.h"
 #include "tcpip/udp.h"
 
-#define UMEM_FACTOR 1
-#define UMEM_BASE (XSK_RING_PROD__DEFAULT_NUM_DESCS * 2)
-#define UMEM_LEN (UMEM_BASE * UMEM_FACTOR)
+#define UMEM_LEN (XSK_RING_PROD__DEFAULT_NUM_DESCS * 2)
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 
 #define MAX_QUEUES 16
@@ -54,9 +52,12 @@ struct xsk_stat {
 
 typedef struct {
     struct xsk_umem* umem;
-    struct xsk_ring_prod* fill_ring;
-    struct xsk_ring_cons* comp_ring;
+    // struct xsk_ring_prod* fill_ring;
+    // struct xsk_ring_cons* comp_ring;
+    struct xsk_ring_prod fq0;
+    struct xsk_ring_cons cq0;
     u32 nbfqs;
+    u32 size;
     void* buffer;
 } umem_info;
 
@@ -67,6 +68,8 @@ typedef struct {
     struct xsk_ring_prod tx;
     struct xsk_ring_cons rx;
     umem_info* umem_info;
+    struct xsk_ring_prod* fill_ring;
+    struct xsk_ring_cons* comp_ring;
     u32 libbpf_flags;
     u32 xdp_flags;
     u16 bind_flags;
@@ -76,14 +79,13 @@ typedef struct {
 
 u32 break_flag = 0;
 
-static void* umem_buffer_create(u32 factor)
+static void* umem_buffer_create(u32 size)
 {
 #ifdef NO_HGPG
-    return mmap(NULL, UMEM_SIZE, PROT_READ | PROT_WRITE,
+    return mmap(NULL, size, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #else
-    printf("***** UMEM_SIZE (%d) * factor (%d) = %d\n", UMEM_SIZE, factor, UMEM_SIZE * factor);
-    return huge_malloc(UMEM_SIZE * factor);
+    return huge_malloc(size);
 #endif
 }
 
@@ -91,7 +93,8 @@ static umem_info* umem_info_create(u32 nbfqs)
 {
     umem_info* info = (umem_info*)calloc(1, sizeof(umem_info));
 
-    info->buffer = umem_buffer_create(nbfqs);
+    info->size = UMEM_SIZE * nbfqs;
+    info->buffer = umem_buffer_create(info->size);
     if (info->buffer == NULL) {
         dlog_error2("umem_buffer_create", 0);
         return NULL;
@@ -99,17 +102,18 @@ static umem_info* umem_info_create(u32 nbfqs)
 
     info->umem = NULL;
     info->nbfqs = nbfqs;
-    info->comp_ring = (struct xsk_ring_cons*)calloc(info->nbfqs, sizeof(struct xsk_ring_cons));
-    info->fill_ring = (struct xsk_ring_prod*)calloc(info->nbfqs, sizeof(struct xsk_ring_prod));
+    // info->comp_ring = (struct xsk_ring_cons*)calloc(info->nbfqs, sizeof(struct xsk_ring_cons));
+    // info->fill_ring = (struct xsk_ring_prod*)calloc(info->nbfqs, sizeof(struct xsk_ring_prod));
     return info;
 }
 
+// FIXME:
 static void umem_info_free(umem_info* info)
 {
     if (info != NULL) {
-        munmap(info->buffer, UMEM_SIZE * info->nbfqs);
-        free(info->fill_ring);
-        free(info->comp_ring);
+        munmap(info->buffer, info->size);
+        // free(info->fill_ring);
+        // free(info->comp_ring);
         xsk_umem__delete(info->umem);
     }
 }
@@ -123,7 +127,6 @@ static int umem_configure(umem_info* umem)
         return EINVAL;
     }
 
-    // FIXME: fill size nbfqs
     const struct xsk_umem_config cfg = {
         .fill_size = FILLQ_LEN,
         .comp_size = COMPQ_LEN,
@@ -136,8 +139,10 @@ static int umem_configure(umem_info* umem)
 #endif
     };
 
-    ret = xsk_umem__create(&umem->umem, umem->buffer, UMEM_SIZE,
-        &umem->fill_ring[0], &umem->comp_ring[0], &cfg);
+    // ret = xsk_umem__create(&umem->umem, umem->buffer, umem->size,
+    //     &umem->fill_ring[0], &umem->comp_ring[0], &cfg);
+    ret = xsk_umem__create(&umem->umem, umem->buffer, umem->size,
+        &umem->fq0, &umem->cq0, &cfg);
     if (ret) {
         dlog_error2("xsk_umem__create", ret);
         return ret;
@@ -150,7 +155,7 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
 {
     int ret = 0;
     u32 nbfqs = xsk->umem_info->nbfqs;
-    printf("***** xsk_configure: fqs in umem: %d\n", nbfqs);
+
     const struct xsk_socket_config xsk_config = {
         .rx_size = FILLQ_LEN,
         .tx_size = COMPQ_LEN,
@@ -159,10 +164,35 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
         .xdp_flags = xsk->xdp_flags
     };
 
-    struct xsk_ring_prod* fq = nbfqs == 1 ? &xsk->umem_info->fill_ring[0]
-                                          : &xsk->umem_info->fill_ring[xsk->index];
-    struct xsk_ring_cons* cq = nbfqs == 1 ? &xsk->umem_info->comp_ring[0]
-                                          : &xsk->umem_info->comp_ring[xsk->index];
+    // struct xsk_ring_prod* fq = nbfqs == 1 ? &xsk->umem_info->fill_ring[0]
+    //                                       : &xsk->umem_info->fill_ring[xsk->index];
+    // struct xsk_ring_cons* cq = nbfqs == 1 ? &xsk->umem_info->comp_ring[0]
+    //                                       : &xsk->umem_info->comp_ring[xsk->index];
+
+    struct xsk_ring_prod* fq = NULL;
+    struct xsk_ring_cons* cq = NULL;
+
+    if (nbfqs == 1) {
+        fq = &xsk->umem_info->fq0;
+    } else {
+        if (xsk->fill_ring == NULL) {
+            // FIXME: free in cleanup
+            xsk->fill_ring = calloc(1, sizeof(struct xsk_ring_prod));
+        }
+
+        fq = xsk->fill_ring;
+    }
+
+    if (nbfqs == 1) {
+        cq = &xsk->umem_info->cq0;
+    } else {
+        if (xsk->comp_ring == NULL) {
+            // FIXME: free in cleanup
+            xsk->comp_ring = calloc(1, sizeof(struct xsk_ring_cons));
+        }
+
+        cq = xsk->comp_ring;
+    }
 
     ret = xsk_socket__create_shared(&xsk->socket, ifname, xsk->queue_id,
         xsk->umem_info->umem, &xsk->rx, NULL, fq, cq, &xsk_config);
@@ -202,10 +232,13 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
 static int fq_ring_configure(xsk_info* xsk)
 {
     // push all frames to fill ring
-    u32 idx, ret, nbfqs = xsk->umem_info->nbfqs,
-                  fqlen = FILLQ_LEN;
-    struct xsk_ring_prod* fq = nbfqs == 1 ? &xsk->umem_info->fill_ring[0]
-                                          : &xsk->umem_info->fill_ring[xsk->index];
+    u32 idx = 0, ret, nbfqs = xsk->umem_info->nbfqs, fqlen = FILLQ_LEN;
+
+    //  struct xsk_ring_prod* fq = nbfqs == 1 ? &xsk->umem_info->fill_ring[0]
+    //                                           : &xsk->umem_info->fill_ring[xsk->index];
+    struct xsk_ring_prod* fq = nbfqs == 1 ? &xsk->umem_info->fq0
+                                          : xsk->fill_ring;
+
     ret = xsk_ring_prod__reserve(fq, fqlen, &idx);
     if (ret != fqlen) {
         dlog_error2("xsk_ring_prod__reserve", ret);
@@ -214,7 +247,6 @@ static int fq_ring_configure(xsk_info* xsk)
 
     // fill addresses
     u32 base = nbfqs != 1 ? xsk->index * UMEM_SIZE : 0;
-    printf("***** xsk %d is being configured with base %d\n", xsk->index, base);
     for (u32 i = 0; i < fqlen; i++) {
         *xsk_ring_prod__fill_addr(fq, idx++) = base + (i * FRAME_SIZE);
     }
@@ -258,9 +290,13 @@ always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len)
 always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
 {
     u32 idx_rx = 0, idx_fq = 0;
-    struct xsk_ring_prod* fq = umem->nbfqs == 1 ? umem->fill_ring : &umem->fill_ring[xsk->index];
+    // struct xsk_ring_prod* fq = umem->nbfqs == 1 ? umem->fill_ring : &umem->fill_ring[xsk->index];
+    struct xsk_ring_prod* fq = umem->nbfqs == 1 ? &umem->fq0 : xsk->fill_ring;
 
+    // u64 t0 = clock_nsecs();
     int rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
+    // printf("xsk_ring_cons__peek %d-%d\n", xsk->index, rcvd);
+    // printf("xsk->index %d clock_nsecs() - t0: %lld\n", xsk->index, clock_nsecs() - t0);
 
     if (!rcvd) {
         if (xsk_ring_prod__needs_wakeup(fq)) {
@@ -321,7 +357,6 @@ struct rx_ctx {
     xsk_info* xsks;
     u32 count;
     u8 pollmode;
-    u8 bench_mode;
     u8 shared_umem;
 };
 
@@ -335,11 +370,9 @@ void* poll_rx(void* rxctx_ptr)
 
     switch (ctx->pollmode) {
     case DQDK_RCV_POLL:
-        printf("***** ctx->count %d\n", ctx->count);
         struct pollfd* fds = (struct pollfd*)calloc(ctx->count, sizeof(struct pollfd));
 
         for (size_t i = 0; i < ctx->count; i++) {
-            printf("***** xsk_socket__fd(xsks[i].socket) %d, xsks[i].queue_id %d\n", xsk_socket__fd(xsks[i].socket), xsks[i].queue_id);
             fds[i].fd = xsk_socket__fd(xsks[i].socket);
             fds[i].events = POLLIN;
         }
@@ -456,6 +489,13 @@ int main(int argc, char** argv)
 #else
     dlog_info("UDP Compilation!");
 #endif
+
+#ifdef NO_HGPG
+    dlog_info("NO_HGPG Compilation!");
+#else
+    dlog_info("HGPG Compilation!");
+#endif
+
     char* opt_ifname = NULL;
     enum xdp_attach_mode opt_mode = XDP_MODE_NATIVE;
     u32 opt_batchsize = 64, opt_queues[MAX_QUEUES] = { -1 },
@@ -467,19 +507,20 @@ int main(int argc, char** argv)
         .it_value.tv_nsec = 0
     };
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1,
-       opt_transportmode = IPPROTO_UDP, opt_pollmode = DQDK_RCV_POLL,
-       opt_affinity = 0;
+       opt_pollmode = DQDK_RCV_POLL, opt_affinity = 0;
 
     int ifindex, ret, opt;
     u32 nbqueues = 0, nbirqs = 0, nprocs = get_nprocs();
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
+    interrupts_t *before_interrupts = NULL, *after_interrupts = NULL;
     struct xdp_program* kern_prog = NULL;
     struct xdp_options xdp_opts;
     char* xdp_filename = XDP_FILE_XSK;
+    cpu_set_t* cpusets = NULL;
     xsk_info* xsks = NULL;
-    // timer_t timer;
+    struct rx_ctx* ctxs = NULL;
+    timer_t timer;
     socklen_t socklen;
-    cpu_set_t cpuset;
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -568,16 +609,6 @@ int main(int argc, char** argv)
         case 'w':
             opt_needs_wakeup = 1;
             break;
-        case 'l':
-            if (strcmp("ip", optarg) == 0) {
-                opt_transportmode = IPPROTO_RAW;
-            } else if (strcmp("udp", optarg) == 0) {
-                opt_transportmode = IPPROTO_UDP;
-            } else {
-                dlog_error("Invalid Protocol");
-                exit(EXIT_FAILURE);
-            }
-            break;
         case 'p':
             if (strcmp("poll", optarg) == 0) {
                 opt_pollmode = DQDK_RCV_POLL;
@@ -613,8 +644,8 @@ int main(int argc, char** argv)
             goto cleanup;
         }
 
-        if (nbirqs != nprocs) {
-            dlog_error("IRQs and number of processors must be equal");
+        if (nbirqs > nprocs) {
+            dlog_error("IRQs should be smaller or equal to number of processors");
             goto cleanup;
         }
     }
@@ -668,10 +699,10 @@ int main(int argc, char** argv)
             goto cleanup;
         }
 
-        if (!is_power_of_2(opt_shared_umem)) {
-            dlog_error("Number of shared sockets should a power of 2");
-            goto cleanup;
-        }
+        // if (!is_power_of_2(opt_shared_umem)) {
+        //     dlog_error("Number of shared sockets should a power of 2");
+        //     goto cleanup;
+        // }
 
         if (nbqueues != 1) {
             nbxsks = opt_shared_umem = nbqueues;
@@ -736,26 +767,27 @@ int main(int argc, char** argv)
     if (IS_THREADED(opt_pollmode, nbqueues)) {
         xsk_workers = (pthread_t*)calloc(nbxsks, sizeof(pthread_t));
         xsk_worker_attrs = (pthread_attr_t*)calloc(nbxsks, sizeof(pthread_attr_t));
+        ctxs = (struct rx_ctx*)calloc(nbxsks, sizeof(struct rx_ctx));
+        if (opt_affinity) {
+            cpusets = (cpu_set_t*)calloc(nbxsks, sizeof(cpu_set_t));
+        }
     }
 
     xsks = (xsk_info*)calloc(nbxsks, sizeof(xsk_info));
     umem_info* shared_umem = NULL;
 
     if (opt_shared_umem > 1) {
-        printf("***** shared_umem (%d) = nbqueues (%d) != 1 ? umem_info_create(nbxsks (%d)) : umem_info_create(1)\n", opt_shared_umem, nbqueues, nbxsks);
         shared_umem = nbqueues != 1 ? umem_info_create(nbxsks) : umem_info_create(1);
-        printf("***** before umem_configure(shared_umem);\n");
         umem_configure(shared_umem);
-        printf("***** after umem_configure(shared_umem);\n");
     }
 
-    // struct sigevent sigv;
-    // sigv.sigev_notify = SIGEV_SIGNAL;
-    // sigv.sigev_signo = SIGUSR1;
-    // timer_create(CLOCK_MONOTONIC, &sigv, &timer);
-    // timer_settime(timer, 0, &opt_duration, NULL);
+    struct sigevent sigv;
+    sigv.sigev_notify = SIGEV_SIGNAL;
+    sigv.sigev_signo = SIGUSR1;
+    timer_create(CLOCK_MONOTONIC, &sigv, &timer);
+    timer_settime(timer, 0, &opt_duration, NULL);
 
-    printf("***** sockets %d, shared_umem %d, nbqueus %d\n", nbxsks, opt_shared_umem, nbqueues);
+    before_interrupts = nic_get_interrupts(opt_ifname, nprocs);
     for (u32 i = 0; i < nbxsks; i++) {
 
         xsks[i].batch_size = opt_batchsize;
@@ -764,7 +796,6 @@ int main(int argc, char** argv)
             | (opt_needs_wakeup ? XDP_USE_NEED_WAKEUP : 0);
 
         if (i != 0 && opt_shared_umem > 1) {
-            printf("***** xsks[%d].bind_flags = XDP_SHARED_UMEM\n", i);
             xsks[i].bind_flags = XDP_SHARED_UMEM;
         }
 
@@ -786,11 +817,13 @@ int main(int argc, char** argv)
         }
 
         if (opt_shared_umem > 1) {
-            if (i == 0) {
-                ret = fq_ring_configure(&xsks[i]);
-                if (ret) {
-                    dlog_error2("fq_ring_configure", ret);
-                    goto cleanup;
+            if (nbqueues == 1) {
+                if (i == 0) {
+                    ret = fq_ring_configure(&xsks[i]);
+                    if (ret) {
+                        dlog_error2("fq_ring_configure", ret);
+                        goto cleanup;
+                    }
                 }
             } else {
                 ret = fq_ring_configure(&xsks[i]);
@@ -830,36 +863,33 @@ int main(int argc, char** argv)
         }
 
         if (IS_THREADED(opt_pollmode, nbqueues)) {
-            struct rx_ctx ctx = {
-                .xsks = &xsks[i],
-                .bench_mode = opt_transportmode,
-                .pollmode = opt_pollmode,
-                .count = 1,
-                .shared_umem = opt_shared_umem,
-            };
+            pthread_attr_t* attrs = opt_affinity ? &xsk_worker_attrs[i] : NULL;
+            struct rx_ctx* ctx = &ctxs[i];
+            ctx->xsks = &xsks[i];
+            ctx->pollmode = opt_pollmode;
+            ctx->count = 1;
+            ctx->shared_umem = opt_shared_umem;
 
-            pthread_attr_init(&xsk_worker_attrs[i]);
             if (opt_affinity) {
+                pthread_attr_init(attrs);
                 // Set process and interrupt affinity to same CPU
                 int cpu = i % nprocs;
-                set_irq_affinity(opt_irqs[i], cpu);
-                CPU_ZERO(&cpuset);
-                CPU_SET(cpu, &cpuset);
-                ret = pthread_attr_setaffinity_np(
-                    &xsk_worker_attrs[i], sizeof(cpu_set_t), &cpuset);
+                nic_set_irq_affinity(opt_irqs[i], cpu);
+                CPU_ZERO(&cpusets[i]);
+                CPU_SET(cpu, &cpusets[i]);
+                ret = pthread_attr_setaffinity_np(attrs, sizeof(cpu_set_t), &cpusets[i]);
                 if (ret) {
                     dlog_error2("pthread_attr_setaffinity_np", ret);
                 }
             }
 
-            pthread_create(&xsk_workers[i], &xsk_worker_attrs[i], poll_rx, (void*)&ctx);
+            pthread_create(&xsk_workers[i], attrs, poll_rx, (void*)ctx);
         }
     }
 
     if (!IS_THREADED(opt_pollmode, nbqueues)) {
         struct rx_ctx ctx = {
             .xsks = xsks,
-            .bench_mode = opt_transportmode,
             .pollmode = opt_pollmode,
             .count = nbxsks,
             .shared_umem = opt_shared_umem,
@@ -892,13 +922,16 @@ int main(int argc, char** argv)
         avg_stats.xstats.rx_fill_ring_empty_descs += xsks[i].stats.xstats.rx_fill_ring_empty_descs;
         avg_stats.xstats.tx_ring_empty_descs += xsks[i].stats.xstats.tx_ring_empty_descs;
     }
+    after_interrupts = nic_get_interrupts(opt_ifname, nprocs);
 
+    // TODO: compute interrupts
     if (nbxsks != 1) {
         printf("Average Stats:\n");
         stats_dump(&avg_stats);
     }
+
 cleanup:
-    // timer_delete(timer);
+    timer_delete(timer);
     xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
     xdp_program__close(kern_prog);
 
@@ -906,6 +939,11 @@ cleanup:
         for (size_t i = 0; i < nbxsks; i++) {
             xsk_info xsk = xsks[i];
             xsk_socket__delete(xsk.socket);
+
+            if (xsk.umem_info->nbfqs != 1) {
+                free(xsk.fill_ring);
+                free(xsk.comp_ring);
+            }
 
             if (!opt_shared_umem && xsk.umem_info != NULL) {
                 umem_info_free(xsk.umem_info);
@@ -917,14 +955,22 @@ cleanup:
         if (xsk_workers != NULL) {
             free(xsk_workers);
         }
+    }
 
-        if (xsk_worker_attrs != NULL) {
-            for (size_t i = 0; i < nbxsks; i++) {
-                pthread_attr_destroy(&xsk_worker_attrs[i]);
-            }
-
-            free(xsk_worker_attrs);
+    if (xsk_worker_attrs != NULL) {
+        for (size_t i = 0; i < nbxsks; i++) {
+            pthread_attr_destroy(&xsk_worker_attrs[i]);
         }
+
+        free(xsk_worker_attrs);
+    }
+
+    if (ctxs != NULL) {
+        free(ctxs);
+    }
+
+    if (cpusets != NULL) {
+        free(cpusets);
     }
 
     if (opt_shared_umem) {

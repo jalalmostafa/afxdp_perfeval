@@ -1,6 +1,6 @@
 TOOL_NAME       := dqdk
-XDP_TARGETS     := bpf/xsk.bpf bpf/rr2.bpf bpf/rr4.bpf bpf/rr8.bpf xdpsock_kern
-USER_TARGETS    := dqdk xdpsock_user
+XDP_TARGETS     := bpf/xsk.bpf bpf/rr2.bpf bpf/rr4.bpf bpf/rr8.bpf
+USER_TARGETS    := dqdk
 EXTRA_USER_DEPS := tcpip/* dlog.h dqdk.h
 TEST_FILE       := 
 
@@ -14,7 +14,7 @@ MAN_PAGE        :=
 ##    UMEM_UNALIGNED    Use unaligned memory
 ##
 USER_DEFINES    += -DRX_DROP
-CFLAGS          += -g -I$(realpath .) $(USER_DEFINES)
+CFLAGS          += -g -fno-inline -I$(realpath .) $(USER_DEFINES)
 BPF_CFLAGS      += -I$(realpath .)
 
 include $(LIB_DIR)/common.mk
