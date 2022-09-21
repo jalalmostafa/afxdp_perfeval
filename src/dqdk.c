@@ -492,6 +492,8 @@ int main(int argc, char** argv)
     struct xdp_program* kern_prog = NULL;
     struct xdp_options xdp_opts;
     char* xdp_filename = XDP_FILE_XSK;
+    pthread_t* xsk_workers = NULL;
+    pthread_attr_t* xsk_worker_attrs = NULL;
     cpu_set_t* cpusets = NULL;
     xsk_info* xsks = NULL;
     struct rx_ctx* ctxs = NULL;
@@ -740,8 +742,6 @@ int main(int argc, char** argv)
     struct bpf_object* obj = xdp_program__bpf_obj(kern_prog);
     int mapfd = bpf_object__find_map_fd_by_name(obj, "xsks_map");
 
-    pthread_t* xsk_workers = NULL;
-    pthread_attr_t* xsk_worker_attrs = NULL;
     if (IS_THREADED(opt_pollmode, nbqueues)) {
         xsk_workers = (pthread_t*)calloc(nbxsks, sizeof(pthread_t));
         xsk_worker_attrs = (pthread_attr_t*)calloc(nbxsks, sizeof(pthread_attr_t));
@@ -914,7 +914,7 @@ int main(int argc, char** argv)
     }
 
 cleanup:
-    if (opt_irqstring != NULL) {
+    if (after_interrupts != NULL && before_interrupts != NULL) {
         u32 sum = 0;
         dlog_info_head("IRQ Interrupts: ");
         for (u32 i = 0; i < after_interrupts->nbirqs; i++) {
