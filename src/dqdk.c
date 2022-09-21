@@ -52,8 +52,6 @@ struct xsk_stat {
 
 typedef struct {
     struct xsk_umem* umem;
-    // struct xsk_ring_prod* fill_ring;
-    // struct xsk_ring_cons* comp_ring;
     struct xsk_ring_prod fq0;
     struct xsk_ring_cons cq0;
     u32 nbfqs;
@@ -102,18 +100,13 @@ static umem_info* umem_info_create(u32 nbfqs)
 
     info->umem = NULL;
     info->nbfqs = nbfqs;
-    // info->comp_ring = (struct xsk_ring_cons*)calloc(info->nbfqs, sizeof(struct xsk_ring_cons));
-    // info->fill_ring = (struct xsk_ring_prod*)calloc(info->nbfqs, sizeof(struct xsk_ring_prod));
     return info;
 }
 
-// FIXME:
 static void umem_info_free(umem_info* info)
 {
     if (info != NULL) {
         munmap(info->buffer, info->size);
-        // free(info->fill_ring);
-        // free(info->comp_ring);
         xsk_umem__delete(info->umem);
     }
 }
@@ -139,8 +132,6 @@ static int umem_configure(umem_info* umem)
 #endif
     };
 
-    // ret = xsk_umem__create(&umem->umem, umem->buffer, umem->size,
-    //     &umem->fill_ring[0], &umem->comp_ring[0], &cfg);
     ret = xsk_umem__create(&umem->umem, umem->buffer, umem->size,
         &umem->fq0, &umem->cq0, &cfg);
     if (ret) {
@@ -164,11 +155,6 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
         .xdp_flags = xsk->xdp_flags
     };
 
-    // struct xsk_ring_prod* fq = nbfqs == 1 ? &xsk->umem_info->fill_ring[0]
-    //                                       : &xsk->umem_info->fill_ring[xsk->index];
-    // struct xsk_ring_cons* cq = nbfqs == 1 ? &xsk->umem_info->comp_ring[0]
-    //                                       : &xsk->umem_info->comp_ring[xsk->index];
-
     struct xsk_ring_prod* fq = NULL;
     struct xsk_ring_cons* cq = NULL;
 
@@ -176,7 +162,6 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
         fq = &xsk->umem_info->fq0;
     } else {
         if (xsk->fill_ring == NULL) {
-            // FIXME: free in cleanup
             xsk->fill_ring = calloc(1, sizeof(struct xsk_ring_prod));
         }
 
@@ -187,7 +172,6 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
         cq = &xsk->umem_info->cq0;
     } else {
         if (xsk->comp_ring == NULL) {
-            // FIXME: free in cleanup
             xsk->comp_ring = calloc(1, sizeof(struct xsk_ring_cons));
         }
 
@@ -228,14 +212,11 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
     return 0;
 }
 
-// FIXME: nfqs?
 static int fq_ring_configure(xsk_info* xsk)
 {
     // push all frames to fill ring
     u32 idx = 0, ret, nbfqs = xsk->umem_info->nbfqs, fqlen = FILLQ_LEN;
 
-    //  struct xsk_ring_prod* fq = nbfqs == 1 ? &xsk->umem_info->fill_ring[0]
-    //                                           : &xsk->umem_info->fill_ring[xsk->index];
     struct xsk_ring_prod* fq = nbfqs == 1 ? &xsk->umem_info->fq0
                                           : xsk->fill_ring;
 
@@ -290,14 +271,9 @@ always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len)
 always_inline int xdp_udpip(xsk_info* xsk, umem_info* umem)
 {
     u32 idx_rx = 0, idx_fq = 0;
-    // struct xsk_ring_prod* fq = umem->nbfqs == 1 ? umem->fill_ring : &umem->fill_ring[xsk->index];
     struct xsk_ring_prod* fq = umem->nbfqs == 1 ? &umem->fq0 : xsk->fill_ring;
 
-    // u64 t0 = clock_nsecs();
     int rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
-    // printf("xsk_ring_cons__peek %d-%d\n", xsk->index, rcvd);
-    // printf("xsk->index %d clock_nsecs() - t0: %lld\n", xsk->index, clock_nsecs() - t0);
-
     if (!rcvd) {
         if (xsk_ring_prod__needs_wakeup(fq)) {
             xsk->stats.rx_empty_polls++;
@@ -699,10 +675,10 @@ int main(int argc, char** argv)
             goto cleanup;
         }
 
-        // if (!is_power_of_2(opt_shared_umem)) {
-        //     dlog_error("Number of shared sockets should a power of 2");
-        //     goto cleanup;
-        // }
+        if (nbqueues == 1 && !is_power_of_2(opt_shared_umem)) {
+            dlog_error("Number of shared sockets per one queue should a power of 2");
+            goto cleanup;
+        }
 
         if (nbqueues != 1) {
             nbxsks = opt_shared_umem = nbqueues;
@@ -722,7 +698,6 @@ int main(int argc, char** argv)
                 xdp_filename = XDP_FILE_RR8;
                 break;
             }
-            printf("xdp_filename %s\n", xdp_filename);
 
             for (size_t i = 0; i < nbxsks; i++) {
                 opt_queues[i] = qid;
@@ -924,12 +899,22 @@ int main(int argc, char** argv)
     }
     after_interrupts = nic_get_interrupts(opt_ifname, nprocs);
 
-    // TODO: compute interrupts
     if (nbxsks != 1) {
         printf("Average Stats:\n");
         stats_dump(&avg_stats);
     }
 
+    for (u32 i = 0; i < after_interrupts->nbirqs; i++) {
+        irq_interrupts_t* intr_before = &before_interrupts->interrupts[i];
+        irq_interrupts_t* intr_after = &after_interrupts->interrupts[i];
+
+        if (intr_before->irq != intr_after->irq) {
+            dlog_errorv("Incorrect IRQs: %d-%d", intr_before->irq, intr_after->irq);
+            continue;
+        }
+
+        dlog_infov("IRQ-%d: %d", intr_after->irq, intr_after->interrupts - intr_before->interrupts);
+    }
 cleanup:
     timer_delete(timer);
     xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
