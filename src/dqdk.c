@@ -472,7 +472,7 @@ int main(int argc, char** argv)
     dlog_info("HGPG Compilation!");
 #endif
 
-    char* opt_ifname = NULL;
+    char *opt_ifname = NULL, *opt_irqstring = NULL;
     enum xdp_attach_mode opt_mode = XDP_MODE_NATIVE;
     u32 opt_batchsize = 64, opt_queues[MAX_QUEUES] = { -1 },
         opt_irqs[MAX_QUEUES] = { -1 }, opt_shared_umem = 0;
@@ -503,7 +503,7 @@ int main(int argc, char** argv)
     signal(SIGABRT, signal_handler);
     signal(SIGUSR1, signal_handler);
 
-    while ((opt = getopt(argc, argv, "a:b:cd:i:l:m:p:q:s:vw")) != -1) {
+    while ((opt = getopt(argc, argv, "a:b:cd:i:l:m:p:q:s:vwI:")) != -1) {
         switch (opt) {
         case 'a':
             // mapping to queues is 1-to-1 e.g. first irq to first queue...
@@ -597,6 +597,9 @@ int main(int argc, char** argv)
             break;
         case 's':
             opt_shared_umem = atoi(optarg);
+            break;
+        case 'I':
+            opt_irqstring = optarg;
             break;
         default:
             dlog_error("Invalid Arg\n");
@@ -762,7 +765,10 @@ int main(int argc, char** argv)
     timer_create(CLOCK_MONOTONIC, &sigv, &timer);
     timer_settime(timer, 0, &opt_duration, NULL);
 
-    before_interrupts = nic_get_interrupts(opt_ifname, nprocs);
+    if (opt_irqstring != NULL) {
+        before_interrupts = nic_get_interrupts(opt_irqstring, nprocs);
+    }
+
     for (u32 i = 0; i < nbxsks; i++) {
 
         xsks[i].batch_size = opt_batchsize;
@@ -897,25 +903,43 @@ int main(int argc, char** argv)
         avg_stats.xstats.rx_fill_ring_empty_descs += xsks[i].stats.xstats.rx_fill_ring_empty_descs;
         avg_stats.xstats.tx_ring_empty_descs += xsks[i].stats.xstats.tx_ring_empty_descs;
     }
-    after_interrupts = nic_get_interrupts(opt_ifname, nprocs);
+
+    if (opt_irqstring != NULL) {
+        after_interrupts = nic_get_interrupts(opt_irqstring, nprocs);
+    }
 
     if (nbxsks != 1) {
         printf("Average Stats:\n");
         stats_dump(&avg_stats);
     }
 
-    for (u32 i = 0; i < after_interrupts->nbirqs; i++) {
-        irq_interrupts_t* intr_before = &before_interrupts->interrupts[i];
-        irq_interrupts_t* intr_after = &after_interrupts->interrupts[i];
+cleanup:
+    if (opt_irqstring != NULL) {
+        u32 sum = 0;
+        dlog_info_head("IRQ Interrupts: ");
+        for (u32 i = 0; i < after_interrupts->nbirqs; i++) {
+            irq_interrupts_t* intr_before = &before_interrupts->interrupts[i];
+            irq_interrupts_t* intr_after = &after_interrupts->interrupts[i];
 
-        if (intr_before->irq != intr_after->irq) {
-            dlog_errorv("Incorrect IRQs: %d-%d", intr_before->irq, intr_after->irq);
-            continue;
+            if (intr_before->irq != intr_after->irq) {
+                dlog_errorv("Incorrect IRQs: %d-%d", intr_before->irq, intr_after->irq);
+                continue;
+            }
+
+            int intrs = intr_after->interrupts - intr_before->interrupts;
+            dlog_info_print("%d: %d - ", intr_after->irq, intrs);
+            sum += intrs;
         }
 
-        dlog_infov("IRQ-%d: %d", intr_after->irq, intr_after->interrupts - intr_before->interrupts);
+        dlog_info_print("Total: %d", sum);
+        dlog_info_exit();
+
+        free(before_interrupts->interrupts);
+        free(after_interrupts->interrupts);
+        free(before_interrupts);
+        free(after_interrupts);
     }
-cleanup:
+
     timer_delete(timer);
     xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
     xdp_program__close(kern_prog);

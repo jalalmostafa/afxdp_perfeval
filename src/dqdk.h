@@ -110,38 +110,44 @@ typedef struct {
     irq_interrupts_t* interrupts;
 } interrupts_t;
 
-interrupts_t* nic_get_interrupts(char* ifname, u32 nprocs)
+interrupts_t* nic_get_interrupts(char* irqstr, u32 nprocs)
 {
+    char cmd[4096] = { 0 };
     char *line = NULL, *cursor = NULL;
+    FILE* fp = NULL;
     u32 idx = 0, current_irq, current_interrupts = 0, procs = 0;
     size_t linesz = 0;
     interrupts_t* intrpts = (interrupts_t*)calloc(1, sizeof(interrupts_t));
     intrpts->nbirqs = nprocs;
     intrpts->interrupts = (irq_interrupts_t*)calloc(nprocs, sizeof(irq_interrupts_t));
-    FILE* fp = fopen("/proc/interrupts", "r");
 
-    while (getline(&line, &linesz, fp) != -1 && idx != nprocs - 1) {
-        if (strstr(line, ifname) == NULL)
-            continue;
+    snprintf(cmd, 4096, "grep -P \"%s\" /proc/interrupts", irqstr);
+    fp = popen(cmd, "r");
 
+    while (getline(&line, &linesz, fp) != -1 && idx != nprocs) {
         current_irq = strtol(line, &cursor, 10);
-
         while (procs != nprocs) {
-            while (!isdigit(cursor))
+            while (!isdigit(cursor[0]))
                 ++cursor;
 
-            current_interrupts += strtol(line, &cursor, 10);
+            current_interrupts += strtol(cursor, &cursor, 10);
             ++procs;
         }
+
         intrpts->interrupts[idx].irq = current_irq;
         intrpts->interrupts[idx].interrupts = current_interrupts;
-        printf("irq %d interrupts %d\n", current_irq, current_interrupts);
 
         procs = 0;
         idx++;
     }
-    free(line);
-    fclose(fp);
+
+    if (line != NULL) {
+        free(line);
+    }
+
+    if (fp != NULL) {
+        pclose(fp);
+    }
 
     return intrpts;
 }
