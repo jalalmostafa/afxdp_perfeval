@@ -10,10 +10,10 @@ MAN_PAGE        :=
 
 ## add USER_DEFINES=-Dflag to make to build daq with some flag where flag can be:
 ##    NO_HGPG           Disable Hugepages
-##    RX_DROP           No L3/L4 checksumming
+##    UDP_MODE          L3/L4 checksumming
 ##    UMEM_UNALIGNED    Use unaligned memory
 ##
-USER_DEFINES    += -DRX_DROP
+USER_DEFINES    +=
 CFLAGS          += -g -fno-inline -I$(realpath .) $(USER_DEFINES)
 BPF_CFLAGS      += -I$(realpath .)
 
