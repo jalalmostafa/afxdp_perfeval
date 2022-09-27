@@ -403,8 +403,98 @@ always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem)
 
 always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
 {
-    (void)xsk;
-    (void)umem;
+    u32 rcvd, i;
+    u32 idx_rx = 0, idx_tx = 0, idx_cq = 0, idx_fq = 0;
+    int ret;
+    struct xsk_ring_prod* fq = umem->nbfqs != 1 ? xsk->fill_ring : &umem->fq0;
+    struct xsk_ring_cons* cq = umem->nbfqs != 1 ? xsk->comp_ring : &umem->cq0;
+
+    if (xsk->bind_flags & XDP_COPY) {
+        xsk->stats.tx_wakeup_sendtos++;
+        awake_sendto(xsk);
+    }
+
+    /* re-add completed Tx buffers */
+    rcvd = xsk_ring_cons__peek(cq, xsk->batch_size, &idx_cq);
+    if (rcvd > 0) {
+        ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
+        while (ret != (int)rcvd) {
+            if (ret < 0) {
+                dlog_error2("xsk_ring_prod__reserve", ret);
+                return ECOMM;
+            }
+
+            if (xsk_ring_prod__needs_wakeup(fq)) {
+                xsk->stats.rx_fill_fail_polls++;
+                recvfrom(xsk_socket__fd(xsk->socket), NULL, 0,
+                    MSG_DONTWAIT, NULL, NULL);
+            }
+            ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
+        }
+
+        for (i = 0; i < rcvd; i++)
+            *xsk_ring_prod__fill_addr(fq, idx_fq++) = *xsk_ring_cons__comp_addr(cq, idx_cq++);
+
+        xsk_ring_prod__submit(fq, rcvd);
+        xsk_ring_cons__release(cq, rcvd);
+    }
+
+    rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
+    if (!rcvd) {
+        if (xsk_ring_prod__needs_wakeup(fq)) {
+            xsk->stats.rx_empty_polls++;
+            recvfrom(xsk_socket__fd(xsk->socket), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+        }
+
+        return ECOMM;
+    }
+
+    xsk->stats.rcvd_frames += rcvd;
+
+    ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
+    while (ret != (int)rcvd) {
+        if (ret < 0) {
+            dlog_error2("xsk_ring_prod__reserve", ret);
+            return ECOMM;
+        }
+
+        if (xsk_ring_prod__needs_wakeup(&xsk->tx)) {
+            xsk->stats.tx_wakeup_sendtos++;
+            awake_sendto(xsk);
+        }
+        ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
+    }
+
+    for (i = 0; i < rcvd; i++) {
+        u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
+        u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++)->len;
+
+#ifdef UMEM_UNALIGNED
+        u64 orig = addr;
+        addr = xsk_umem__add_offset_to_addr(addr);
+#endif
+        char* pkt = xsk_umem__get_data(umem->buffer, addr);
+        struct ether_header* eth = (struct ether_header*)pkt;
+        struct ether_addr* src_addr = (struct ether_addr*)&eth->ether_shost;
+        struct ether_addr* dst_addr = (struct ether_addr*)&eth->ether_dhost;
+        struct ether_addr tmp;
+
+        tmp = *src_addr;
+        *src_addr = *dst_addr;
+        *dst_addr = tmp;
+
+#ifdef UMEM_UNALIGNED
+        xsk_ring_prod__tx_desc(&xsk->tx, idx_tx)->addr = orig;
+#else
+        xsk_ring_prod__tx_desc(&xsk->tx, idx_tx)->addr = addr;
+#endif
+        xsk_ring_prod__tx_desc(&xsk->tx, idx_tx++)->len = len;
+    }
+
+    xsk_ring_prod__submit(&xsk->tx, rcvd);
+    xsk_ring_cons__release(&xsk->rx, rcvd);
+
+    xsk->stats.sent_frames += rcvd;
     return 0;
 }
 
@@ -532,7 +622,6 @@ void* bench_tx(void* txctxptr)
     return NULL;
 }
 
-// FIXME: use xdp_l2fwd
 void* bench_l2fwd(void* l2fwdctxptr)
 {
     struct benchmark_ctx* ctx = (struct benchmark_ctx*)l2fwdctxptr;
@@ -837,8 +926,13 @@ int main(int argc, char** argv)
             }
             break;
         case 'D':
-            // FIXME: convert string to binary hw addr
-            // sscanf(macStr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]);
+            if (sscanf(optarg, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                    &opt_dmac[0], &opt_dmac[1], &opt_dmac[2], &opt_dmac[3],
+                    &opt_dmac[4], &opt_dmac[5])
+                < 6) {
+                dlog_error("Invalid Destination MAC Address");
+                exit(EXIT_FAILURE);
+            }
             break;
         default:
             dlog_error("Invalid Arg\n");
@@ -1150,10 +1244,8 @@ int main(int argc, char** argv)
             .nbxsks_per_thread = nbxsks,
             .shared_umem = opt_shared_umem,
         };
-        printf("before memcpy\n");
         memcpy(&ctx.smac, smac, 6);
         memcpy(&ctx.dmac, opt_dmac, 6);
-        printf("to poll\n");
         opt_handler(&ctx);
     }
 
