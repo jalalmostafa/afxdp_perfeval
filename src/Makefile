@@ -14,7 +14,7 @@ MAN_PAGE        :=
 ##    UMEM_UNALIGNED    Use unaligned memory
 ##
 USER_DEFINES    +=
-CFLAGS          += -g -fno-inline -I$(realpath .) $(USER_DEFINES)
+CFLAGS          += -I$(realpath .) $(USER_DEFINES)
 BPF_CFLAGS      += -I$(realpath .)
 
 include $(LIB_DIR)/common.mk
