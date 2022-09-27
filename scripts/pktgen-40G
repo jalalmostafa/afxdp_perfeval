@@ -1,0 +1,73 @@
+# Global configuration:
+geometry 132x45
+disable mac_from_arp
+
+set 0 count 0
+set 0 size 64
+set 0 rate 100
+set 0 burst 64
+set 0 sport 1234
+set 0 dport 5678
+set 0 prime 1
+set 0 type ipv4
+set 0 proto udp
+set 0 src ip 192.168.10.103/24
+set 0 dst ip 192.168.10.102
+set 0 src mac 1c:34:da:5b:a7:cc
+set 0 dst mac 1c:34:da:5b:a7:d4
+set 0 pattern abc
+set 0 jitter 5
+
+disable 0 mpls
+disable 0 qinq
+disable 0 gre
+disable 0 gre_eth
+disable 0 vxlan
+#
+# Port flag values:
+disable 0 icmp
+disable 0 pcap
+enable 0 range
+disable 0 latency
+disable 0 process
+disable 0 capture
+disable 0 rx_tap
+disable 0 tx_tap
+disable 0 vlan
+disable 0 rate
+
+# Set up the rate data for the port.
+rate 0 fps 60
+rate 0 lines 720
+rate 0 pixels 1280
+rate 0 color bits 1
+rate 0 payload size 800
+
+rate 0 overhead 0
+#
+# Set up the sequence data for the port.
+# set 0 seq_cnt 0
+#
+
+range 0 src ip start 192.168.10.1
+range 0 src ip min 192.168.10.1
+range 0 src ip max 192.168.10.4
+range 0 src ip inc 0.0.0.1
+
+range 0 src mac start 1c:34:da:5b:a7:cc 
+range 0 src mac min 1c:34:da:5b:a7:cc 
+range 0 src mac max 1c:34:da:5b:a7:cc
+range 0 src mac inc 00:00:00:00:00:00
+
+range 0 dst mac start 1c:34:da:5b:a7:d4
+range 0 dst mac min 1c:34:da:5b:a7:d4
+range 0 dst mac max 1c:34:da:5b:a7:d4
+range 0 dst mac inc 00:00:00:00:00:00
+
+range 0 size start 64
+range 0 size min 64
+range 0 size max 64
+range 0 size inc 0
+
+
+start 0
