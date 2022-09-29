@@ -70,3 +70,6 @@ dkms.conf
 dqdk
 *.ll
 xdpsock*
+*.ipynb
+*.csv
+
