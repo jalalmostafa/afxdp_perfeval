@@ -39,7 +39,7 @@
 #define MAX_QUEUES 16
 #define UMEM_SIZE (UMEM_LEN * FRAME_SIZE)
 #define FILLQ_LEN UMEM_LEN
-#define COMPQ_LEN XSK_RING_CONS__DEFAULT_NUM_DESCS
+#define COMPQ_LEN UMEM_LEN
 
 struct xsk_stat {
     u64 rcvd_frames;
@@ -78,6 +78,7 @@ typedef struct {
     u32 xdp_flags;
     u16 bind_flags;
     u32 batch_size;
+    u8 busy_poll;
     struct xsk_stat stats;
 } xsk_info;
 
@@ -191,28 +192,30 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
         return ret;
     }
 
-    u32 sockopt = 1;
-    ret = setsockopt(xsk_socket__fd(xsk->socket), SOL_SOCKET, SO_PREFER_BUSY_POLL,
-        (void*)&sockopt, sizeof(sockopt));
-    if (ret) {
-        dlog_error2("setsockopt(SO_PREFER_BUSY_POLL)", ret);
-        return ret;
-    }
+    if (xsk->busy_poll) {
+        u32 sockopt = 1;
+        ret = setsockopt(xsk_socket__fd(xsk->socket), SOL_SOCKET, SO_PREFER_BUSY_POLL,
+            (void*)&sockopt, sizeof(sockopt));
+        if (ret) {
+            dlog_error2("setsockopt(SO_PREFER_BUSY_POLL)", ret);
+            return ret;
+        }
 
-    sockopt = 20;
-    ret = setsockopt(xsk_socket__fd(xsk->socket), SOL_SOCKET, SO_BUSY_POLL,
-        (void*)&sockopt, sizeof(sockopt));
-    if (ret) {
-        dlog_error2("setsockopt(SO_BUSY_POLL)", ret);
-        return ret;
-    }
+        sockopt = 20;
+        ret = setsockopt(xsk_socket__fd(xsk->socket), SOL_SOCKET, SO_BUSY_POLL,
+            (void*)&sockopt, sizeof(sockopt));
+        if (ret) {
+            dlog_error2("setsockopt(SO_BUSY_POLL)", ret);
+            return ret;
+        }
 
-    sockopt = xsk->batch_size;
-    ret = setsockopt(xsk_socket__fd(xsk->socket), SOL_SOCKET, SO_BUSY_POLL_BUDGET,
-        (void*)&sockopt, sizeof(sockopt));
-    if (ret) {
-        dlog_error2("setsockopt(SO_BUSY_POLL_BUDGET)", ret);
-        return ret;
+        sockopt = xsk->batch_size;
+        ret = setsockopt(xsk_socket__fd(xsk->socket), SOL_SOCKET, SO_BUSY_POLL_BUDGET,
+            (void*)&sockopt, sizeof(sockopt));
+        if (ret) {
+            dlog_error2("setsockopt(SO_BUSY_POLL_BUDGET)", ret);
+            return ret;
+        }
     }
 
     return 0;
@@ -291,7 +294,7 @@ always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
 
     int rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
     if (!rcvd) {
-        if (xsk_ring_prod__needs_wakeup(fq)) {
+        if (xsk->batch_size || xsk_ring_prod__needs_wakeup(fq)) {
             xsk->stats.rx_empty_polls++;
             recvfrom(xsk_socket__fd(xsk->socket), NULL, 0, MSG_DONTWAIT, NULL, NULL);
         }
@@ -305,7 +308,7 @@ always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
             return -ret;
         }
 
-        if (xsk_ring_prod__needs_wakeup(fq)) {
+        if (xsk->busy_poll || xsk_ring_prod__needs_wakeup(fq)) {
             xsk->stats.rx_fill_fail_polls++;
             recvfrom(xsk_socket__fd(xsk->socket), NULL, 0, MSG_DONTWAIT, NULL, NULL);
         }
@@ -364,7 +367,7 @@ always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem)
     while (xsk_ring_prod__reserve(&xsk->tx, xsk->batch_size, &idx)
         < xsk->batch_size) {
 
-        if (xsk_ring_prod__needs_wakeup(&xsk->tx)) {
+        if (xsk->busy_poll || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
             xsk->stats.tx_wakeup_sendtos++;
             ret = awake_sendto(xsk);
             if (ret) {
@@ -424,7 +427,7 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
                 return ECOMM;
             }
 
-            if (xsk_ring_prod__needs_wakeup(fq)) {
+            if (xsk->busy_poll || xsk_ring_prod__needs_wakeup(fq)) {
                 xsk->stats.rx_fill_fail_polls++;
                 recvfrom(xsk_socket__fd(xsk->socket), NULL, 0,
                     MSG_DONTWAIT, NULL, NULL);
@@ -441,7 +444,7 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
 
     rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
     if (!rcvd) {
-        if (xsk_ring_prod__needs_wakeup(fq)) {
+        if (xsk->busy_poll || xsk_ring_prod__needs_wakeup(fq)) {
             xsk->stats.rx_empty_polls++;
             recvfrom(xsk_socket__fd(xsk->socket), NULL, 0, MSG_DONTWAIT, NULL, NULL);
         }
@@ -458,7 +461,7 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
             return ECOMM;
         }
 
-        if (xsk_ring_prod__needs_wakeup(&xsk->tx)) {
+        if (xsk->busy_poll || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
             xsk->stats.tx_wakeup_sendtos++;
             awake_sendto(xsk);
         }
@@ -787,7 +790,7 @@ int main(int argc, char** argv)
         .it_value.tv_nsec = 0
     };
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1,
-       opt_pollmode = DQDK_RCV_POLL, opt_affinity = 0;
+       opt_pollmode = DQDK_RCV_POLL, opt_affinity = 0, opt_busy_poll = 0;
 
     // program variables
     int ifindex, ret, opt;
@@ -812,7 +815,7 @@ int main(int argc, char** argv)
     signal(SIGABRT, signal_handler);
     signal(SIGUSR1, signal_handler);
 
-    while ((opt = getopt(argc, argv, "a:b:cd:i:l:m:p:q:s:vwI:B:D:")) != -1) {
+    while ((opt = getopt(argc, argv, "a:b:cd:i:l:m:p:q:s:vwBI:M:D:")) != -1) {
         switch (opt) {
         case 'a':
             // mapping to queues is 1-to-1 e.g. first irq to first queue...
@@ -910,7 +913,7 @@ int main(int argc, char** argv)
         case 'I':
             opt_irqstring = optarg;
             break;
-        case 'B':
+        case 'M':
             if (strcmp("rxdrop", optarg) == 0) {
                 opt_handler = bench_rx;
                 opt_benchmark = BENCH_RX_DROP;
@@ -924,6 +927,9 @@ int main(int argc, char** argv)
                 dlog_error("Invalid Benchmarking Mode");
                 exit(EXIT_FAILURE);
             }
+            break;
+        case 'B':
+            opt_busy_poll = 1;
             break;
         case 'D':
             if (sscanf(optarg, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
@@ -1131,6 +1137,7 @@ int main(int argc, char** argv)
     for (u32 i = 0; i < nbxsks; i++) {
 
         xsks[i].batch_size = opt_batchsize;
+        xsks[i].busy_poll = opt_busy_poll;
         xsks[i].libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
         xsks[i].bind_flags = (opt_zcopy ? XDP_ZEROCOPY : XDP_COPY)
             | (opt_needs_wakeup ? XDP_USE_NEED_WAKEUP : 0);

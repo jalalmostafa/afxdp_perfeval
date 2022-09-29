@@ -137,6 +137,7 @@ interrupts_t* nic_get_interrupts(char* irqstr, u32 nprocs)
         intrpts->interrupts[idx].irq = current_irq;
         intrpts->interrupts[idx].interrupts = current_interrupts;
 
+        current_interrupts = 0;
         procs = 0;
         idx++;
     }
