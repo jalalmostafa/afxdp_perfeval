@@ -79,6 +79,7 @@ typedef struct {
     u16 bind_flags;
     u32 batch_size;
     u8 busy_poll;
+    u16 tx_pkt_size;
     struct xsk_stat stats;
 } xsk_info;
 
@@ -245,13 +246,13 @@ static int fq_ring_configure(xsk_info* xsk)
     return 0;
 }
 
-static void pktgen_fill_umem(umem_info* umem, u8* dmac, u8* smac, u32 to)
+static void pktgen_fill_umem(umem_info* umem, u8* dmac, u8* smac, u32 to, u16 pkt_size)
 {
     u8 pkt_data[FRAME_SIZE];
-    udp_create_frame(pkt_data, dmac, smac);
+    udp_create_frame(pkt_data, dmac, smac, pkt_size);
     for (u32 i = 0; i < to; i++) {
         u8* slot = xsk_umem__get_data(umem->buffer, i * FRAME_SIZE);
-        memcpy(slot, pkt_data, PKT_SIZE);
+        memcpy(slot, pkt_data, pkt_size);
     }
 }
 
@@ -389,7 +390,7 @@ always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem)
     for (i = 0; i < xsk->batch_size; i++) {
         struct xdp_desc* tx_desc = xsk_ring_prod__tx_desc(&xsk->tx, idx + i);
         tx_desc->addr = base + (i * FRAME_SIZE);
-        tx_desc->len = PKT_SIZE;
+        tx_desc->len = xsk->tx_pkt_size;
 
         // char* pkt = xsk_umem__get_data(umem->buffer, tx_desc->addr);
 
@@ -791,6 +792,7 @@ int main(int argc, char** argv)
     };
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1,
        opt_pollmode = DQDK_RCV_POLL, opt_affinity = 0, opt_busy_poll = 0;
+    u16 opt_txpktsize = 64;
 
     // program variables
     int ifindex, ret, opt;
@@ -815,7 +817,7 @@ int main(int argc, char** argv)
     signal(SIGABRT, signal_handler);
     signal(SIGUSR1, signal_handler);
 
-    while ((opt = getopt(argc, argv, "a:b:cd:i:l:m:p:q:s:vwBI:M:D:")) != -1) {
+    while ((opt = getopt(argc, argv, "a:b:cd:i:l:m:p:q:s:vwt:BI:M:D:")) != -1) {
         switch (opt) {
         case 'a':
             // mapping to queues is 1-to-1 e.g. first irq to first queue...
@@ -940,6 +942,13 @@ int main(int argc, char** argv)
                 exit(EXIT_FAILURE);
             }
             break;
+        case 't':
+            opt_txpktsize = atoi(optarg);
+            if (opt_txpktsize < 64 || opt_txpktsize > 4096) {
+                dlog_errorv("Invalid TX Packet Size %d (not between 64 and 4096)", opt_txpktsize);
+                exit(EXIT_FAILURE);
+            }
+            break;
         default:
             dlog_error("Invalid Arg\n");
             exit(EXIT_FAILURE);
@@ -1004,7 +1013,7 @@ int main(int argc, char** argv)
 
     switch (opt_benchmark) {
     case BENCH_RX_DROP:
-        dlog_info("Benchmarking Mode: BENCH_RX_DROP");
+        dlog_info("Benchmarking Mode: RX_DROP");
         break;
     case BENCH_TX_ONLY:
         dlog_info("Benchmarking Mode: TX_ONLY");
@@ -1135,7 +1144,8 @@ int main(int argc, char** argv)
     }
 
     for (u32 i = 0; i < nbxsks; i++) {
-
+        xsks[i].tx_pkt_size = opt_txpktsize;
+        printf("**** xsks[i].tx_pkt_size: %d | opt_txpktsize: %d\n", xsks[i].tx_pkt_size, opt_txpktsize);
         xsks[i].batch_size = opt_batchsize;
         xsks[i].busy_poll = opt_busy_poll;
         xsks[i].libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
@@ -1189,10 +1199,10 @@ int main(int argc, char** argv)
             }
         } else if (opt_shared_umem > 1) {
             if (i == 0) {
-                pktgen_fill_umem(shared_umem, opt_dmac, smac, UMEM_LEN * nbqueues);
+                pktgen_fill_umem(shared_umem, opt_dmac, smac, UMEM_LEN * nbqueues, opt_txpktsize);
             }
         } else {
-            pktgen_fill_umem(xsks[i].umem_info, opt_dmac, smac, UMEM_LEN);
+            pktgen_fill_umem(xsks[i].umem_info, opt_dmac, smac, UMEM_LEN, opt_txpktsize);
         }
 
         u32 sockfd = xsk_socket__fd(xsks[i].socket);

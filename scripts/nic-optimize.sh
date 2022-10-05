@@ -30,11 +30,11 @@ tx-scatter-gather off tx-vlan-stag-hw-insert off ntuple off rx-vlan-filter off \
 tx-gre-csum-segmentation off tx-tcp-mangleid-segmentation off txvlan off rx off \
 rxhash off tx-gre-segmentation off tx-tcp-segmentation off rx-all off rxvlan off \
 tx-gso-partial off tx-tcp6-segmentation off rx-checksumming off tx-checksumming off
-ethtool --set-priv-flags $1 rx_cqe_moder on rx_cqe_compress on tx_cqe_moder on tx_cqe_compress on
+#ethtool --set-priv-flags $1 rx_cqe_moder off tx_cqe_moder off rx_cqe_compress off rx_striding_rq off rx_no_csum_complete off xdp_tx_mpwqe off skb_tx_mpwqe off tx_port_ts off
 
-echo "Setting PCI Max Read Request Size to 1024 (assuming one NIC port i.e. one PCI address)..."
-pci=`ethtool -i $1 | grep 'bus-info:' | sed 's/bus-info: //'`
-setpci -s $pci 68.w=3BCD
+#echo "Setting PCI Max Read Request Size to 1024 (assuming one NIC port i.e. one PCI address)..."
+#pci=`ethtool -i $1 | grep 'bus-info:' | sed 's/bus-info: //'`
+#setpci -s $pci 68.w=3BCD
 
 echo "Optimizing Virtual Memory Usage..."
 sysctl -w vm.zone_reclaim_mode=0

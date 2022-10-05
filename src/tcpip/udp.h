@@ -62,16 +62,17 @@ static void* memset32_htonl(void* dest, u32 val, u32 size)
 
     val = htonl(val);
 
-    for (i = 0; i < (size & (~0x3)); i += 4)
+    // move 4 bytes to the nearest multiple of 4 that is smaller than size
+    for (i = 0; i < (size & (~0x3)); i += 4) {
         ptr[i >> 2] = val;
+    }
 
     for (; i < size; i++)
         ((char*)dest)[i] = ((char*)&val)[i & 3];
-
     return dest;
 }
 
-always_inline void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr)
+always_inline void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr, u16 pktsize)
 {
     struct pktgen_hdr* pktgen_hdr;
     struct udphdr* udp_hdr;
@@ -92,7 +93,7 @@ always_inline void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr)
     ip_hdr->version = IPVERSION;
     ip_hdr->ihl = 0x5; /* 20 byte header */
     ip_hdr->tos = 0x0;
-    ip_hdr->tot_len = htons(IP_PKT_SIZE);
+    ip_hdr->tot_len = htons(pktsize - ETH_HDR_SIZE);
     ip_hdr->id = 0;
     ip_hdr->frag_off = 0;
     ip_hdr->ttl = IPDEFTTL;
@@ -107,16 +108,16 @@ always_inline void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr)
     /* UDP header */
     udp_hdr->source = htons(0x1000);
     udp_hdr->dest = htons(0x1000);
-    udp_hdr->len = htons(PKT_SIZE);
+    udp_hdr->len = htons(pktsize);
 
     pktgen_hdr->pgh_magic = htonl(PKTGEN_MAGIC);
 
     /* UDP data */
-    memset32_htonl(pkt_data + PKT_HDR_SIZE, 0x12345678, PKT_SIZE);
+    memset32_htonl(pkt_data + PKT_HDR_SIZE, 0x12345678, pktsize);
 
     /* UDP header checksum */
     udp_hdr->check = 0;
-    udp_hdr->check = udp_csum(ip_hdr->saddr, ip_hdr->daddr, PKT_SIZE, IPPROTO_UDP, (u16*)udp_hdr);
+    udp_hdr->check = udp_csum(ip_hdr->saddr, ip_hdr->daddr, pktsize, IPPROTO_UDP, (u16*)udp_hdr);
 }
 
 #endif
