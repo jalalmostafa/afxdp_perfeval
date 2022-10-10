@@ -55,7 +55,7 @@ struct pktgen_hdr {
     u64 ts_nano;
 };
 
-static void* memset32_htonl(void* dest, u32 val, u32 size)
+always_inline void* memset32_htonl(void* dest, u32 val, u32 size)
 {
     u32* ptr = (u32*)dest;
     u32 i;

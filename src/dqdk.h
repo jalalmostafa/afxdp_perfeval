@@ -17,7 +17,7 @@ typedef __u16 u16;
 typedef __u32 u32;
 typedef __u64 u64;
 
-#define always_inline // inline __attribute__((always_inline))
+#define always_inline inline __attribute__((always_inline))
 
 #define HUGEPAGE_2MB_SIZE 2097152
 #define HUGETLB_PATH "/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages"

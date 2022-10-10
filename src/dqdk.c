@@ -1145,7 +1145,6 @@ int main(int argc, char** argv)
 
     for (u32 i = 0; i < nbxsks; i++) {
         xsks[i].tx_pkt_size = opt_txpktsize;
-        printf("**** xsks[i].tx_pkt_size: %d | opt_txpktsize: %d\n", xsks[i].tx_pkt_size, opt_txpktsize);
         xsks[i].batch_size = opt_batchsize;
         xsks[i].busy_poll = opt_busy_poll;
         xsks[i].libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
