@@ -295,7 +295,12 @@ always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
 
     int rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
     if (!rcvd) {
-        if (xsk->batch_size || xsk_ring_prod__needs_wakeup(fq)) {
+        /**
+         * wakeup by issuing a recvfrom if needs wakeup
+         * or if busy poll was specified. If SO_PREFER_BUSY_POLL is specified
+         * then we should wake up to force a bottom-half interrup
+         */
+        if (xsk->busy_poll || xsk_ring_prod__needs_wakeup(fq)) {
             xsk->stats.rx_empty_polls++;
             recvfrom(xsk_socket__fd(xsk->socket), NULL, 0, MSG_DONTWAIT, NULL, NULL);
         }
@@ -1119,14 +1124,14 @@ int main(int argc, char** argv)
 
     if (IS_THREADED(opt_pollmode, nbqueues)) {
         xsk_workers = (pthread_t*)calloc(nbxsks, sizeof(pthread_t));
-        xsk_worker_attrs = (pthread_attr_t*)calloc(nbxsks, sizeof(pthread_attr_t));
         ctxs = (struct benchmark_ctx*)calloc(nbxsks, sizeof(struct benchmark_ctx));
-        if (opt_affinity) {
-            cpusets = (cpu_set_t*)calloc(nbxsks, sizeof(cpu_set_t));
-        }
     }
 
     xsks = (xsk_info*)calloc(nbxsks, sizeof(xsk_info));
+    xsk_worker_attrs = (pthread_attr_t*)calloc(nbxsks, sizeof(pthread_attr_t));
+    if (opt_affinity) {
+        cpusets = (cpu_set_t*)calloc(nbxsks, sizeof(cpu_set_t));
+    }
 
     if (opt_shared_umem > 1) {
         shared_umem = nbqueues != 1 ? umem_info_create(nbxsks) : umem_info_create(1);
@@ -1262,6 +1267,14 @@ int main(int argc, char** argv)
         };
         memcpy(&ctx.smac, smac, 6);
         memcpy(&ctx.dmac, opt_dmac, 6);
+
+        if (opt_affinity) {
+            nic_set_irq_affinity(opt_irqs[0], 0);
+            CPU_ZERO(&cpusets[0]);
+            CPU_SET(0, &cpusets[0]);
+            sched_setaffinity(getpid(), sizeof(cpu_set_t), &cpusets[0]);
+        }
+
         opt_handler(&ctx);
     }
 
