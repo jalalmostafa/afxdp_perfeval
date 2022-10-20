@@ -39,7 +39,7 @@
 #define MAX_QUEUES 16
 #define UMEM_SIZE (UMEM_LEN * FRAME_SIZE)
 #define FILLQ_LEN UMEM_LEN
-#define COMPQ_LEN UMEM_LEN
+#define COMPQ_LEN XSK_RING_PROD__DEFAULT_NUM_DESCS
 
 struct xsk_stat {
     u64 rcvd_frames;
@@ -79,7 +79,9 @@ typedef struct {
     u16 bind_flags;
     u32 batch_size;
     u8 busy_poll;
+    u8 needs_wakeup;
     u16 tx_pkt_size;
+    u32 outstanding_tx;
     struct xsk_stat stats;
 } xsk_info;
 
@@ -363,52 +365,107 @@ always_inline int awake_sendto(xsk_info* xsk)
     return -1;
 }
 
-always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem)
+always_inline int complete_tx(xsk_info* xsk, struct xsk_ring_cons* cq)
 {
-    u32 idx, rcvd;
-    struct xsk_ring_cons* cq = umem->nbfqs == 1 ? &umem->cq0 : xsk->comp_ring;
+    unsigned int rcvd, ret;
+    u32 idx;
+
+    if (!xsk->outstanding_tx)
+        return 0;
+
+    if (!xsk->needs_wakeup || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
+        xsk->stats.tx_wakeup_sendtos++;
+        ret = awake_sendto(xsk);
+        if (ret) {
+            dlog_error2("awake_sendto", ret);
+            return ECOMM;
+        }
+    }
+
+    rcvd = xsk_ring_cons__peek(cq, xsk->batch_size, &idx);
+    if (rcvd > 0) {
+        xsk_ring_cons__release(cq, rcvd);
+        xsk->outstanding_tx -= rcvd;
+    }
+
+    return 0;
+}
+
+always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem, u32* umem_cursor)
+{
+    u32 idx;
     int ret;
-    unsigned int i;
 
-    while (xsk_ring_prod__reserve(&xsk->tx, xsk->batch_size, &idx)
-        < xsk->batch_size) {
-
-        if (xsk->busy_poll || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
-            xsk->stats.tx_wakeup_sendtos++;
-            ret = awake_sendto(xsk);
-            if (ret) {
-                dlog_error2("awake_sendto", ret);
-                return ECOMM;
-            }
-        }
-
-        rcvd = xsk_ring_cons__peek(cq, xsk->batch_size, &idx);
-        if (rcvd > 0) {
-            xsk_ring_cons__release(cq, rcvd);
-        }
+    struct xsk_ring_cons* cq = umem->nbfqs == 1 ? &umem->cq0 : xsk->comp_ring;
+    while (xsk_ring_prod__reserve(&xsk->tx, xsk->batch_size, &idx) < xsk->batch_size) {
+        ret = complete_tx(xsk, cq);
+        if (ret)
+            return ret;
 
         if (break_flag)
             return 0;
     }
 
     u32 base = umem->nbfqs != 1 ? xsk->index * UMEM_SIZE : 0;
-    for (i = 0; i < xsk->batch_size; i++) {
-        struct xdp_desc* tx_desc = xsk_ring_prod__tx_desc(&xsk->tx, idx + i);
-        tx_desc->addr = base + (i * FRAME_SIZE);
-        tx_desc->len = xsk->tx_pkt_size;
-
-        // char* pkt = xsk_umem__get_data(umem->buffer, tx_desc->addr);
-
-        // struct pktgen_hdr* pktgen_hdr = (struct pktgen_hdr*)(pkt + PKTGEN_HDR_OFFSET);
-        // pktgen_hdr->seq_num = htonl((*seq)++);
-        // pktgen_hdr->ts_nano = ts;
+    for (u32 i = 0; i < xsk->batch_size; i++) {
+        struct xdp_desc* desc = xsk_ring_prod__tx_desc(&xsk->tx, idx + i);
+        desc->addr = base + ((*umem_cursor + i) * FRAME_SIZE);
+        desc->len = xsk->tx_pkt_size - ETH_FCS_SIZE;
     }
 
     xsk_ring_prod__submit(&xsk->tx, xsk->batch_size);
     xsk->stats.sent_frames += xsk->batch_size;
+    xsk->outstanding_tx += xsk->batch_size;
+    *umem_cursor += xsk->batch_size;
+    *umem_cursor %= UMEM_LEN;
 
-    return xsk->batch_size;
+    ret = complete_tx(xsk, cq);
+    if (ret)
+        return ret;
+
+    return 0;
 }
+
+// always_inline int complete_tx(xsk_info* xsk, struct xsk_ring_cons* cq)
+// {
+//     unsigned int rcvd, ret;
+//     u32 idx;
+
+//     if (!xsk->needs_wakeup || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
+//         xsk->stats.tx_wakeup_sendtos++;
+//         ret = awake_sendto(xsk);
+//         if (ret) {
+//             dlog_error2("awake_sendto", ret);
+//             return ECOMM;
+//         }
+//     }
+
+//     rcvd = xsk_ring_cons__peek(cq, xsk->batch_size, &idx);
+//     if (rcvd > 0) {
+//         xsk_ring_cons__release(cq, rcvd);
+//         xsk->stats.sent_frames += rcvd;
+//     }
+
+//     return 0;
+// }
+
+// always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem, u32* umem_cursor)
+// {
+//     u32 idx;
+//     int ret;
+//     (void)umem_cursor;
+
+//     struct xsk_ring_cons* cq = umem->nbfqs == 1 ? &umem->cq0 : xsk->comp_ring;
+
+//     u32 base = umem->nbfqs != 1 ? xsk->index * UMEM_SIZE : 0;
+//     for (u32 i = 0; i < xsk->batch_size; i++) {
+//         struct xdp_desc* desc = xsk_ring_prod__tx_desc(&xsk->tx, idx + i);
+//         desc->addr = base + (i * FRAME_SIZE);
+//         desc->len = xsk->tx_pkt_size - ETH_FCS_SIZE;
+//     }
+
+//     return 0;
+// }
 
 always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
 {
@@ -578,6 +635,7 @@ void* bench_tx(void* txctxptr)
 {
     struct benchmark_ctx* ctx = (struct benchmark_ctx*)txctxptr;
     xsk_info* xsks = ctx->xsks;
+    u32 umem_cursor = 0;
     u64 t0, t1;
 
     switch (ctx->pollmode) {
@@ -600,7 +658,7 @@ void* bench_tx(void* txctxptr)
                 continue;
             } else {
                 for (size_t i = 0; i < ctx->nbxsks_per_thread; i++) {
-                    ret = xdp_txonly(&xsks[i], xsks[i].umem_info);
+                    ret = xdp_txonly(&xsks[i], xsks[i].umem_info, &umem_cursor);
                 }
             }
         }
@@ -611,7 +669,7 @@ void* bench_tx(void* txctxptr)
         t0 = clock_nsecs();
         while (!break_flag) {
             for (size_t i = 0; i < ctx->nbxsks_per_thread; i++) {
-                xdp_txonly(&xsks[i], xsks[i].umem_info);
+                xdp_txonly(&xsks[i], xsks[i].umem_info, &umem_cursor);
             }
         }
         t1 = clock_nsecs();
@@ -796,7 +854,7 @@ int main(int argc, char** argv)
         .it_value.tv_nsec = 0
     };
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1,
-       opt_pollmode = DQDK_RCV_POLL, opt_affinity = 0, opt_busy_poll = 0;
+       opt_pollmode = DQDK_RCV_RTC, opt_affinity = 0, opt_busy_poll = 0;
     u16 opt_txpktsize = 64;
 
     // program variables
@@ -1152,6 +1210,8 @@ int main(int argc, char** argv)
         xsks[i].tx_pkt_size = opt_txpktsize;
         xsks[i].batch_size = opt_batchsize;
         xsks[i].busy_poll = opt_busy_poll;
+        xsks[i].needs_wakeup = opt_needs_wakeup;
+
         xsks[i].libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
         xsks[i].bind_flags = (opt_zcopy ? XDP_ZEROCOPY : XDP_COPY)
             | (opt_needs_wakeup ? XDP_USE_NEED_WAKEUP : 0);
@@ -1272,7 +1332,7 @@ int main(int argc, char** argv)
             nic_set_irq_affinity(opt_irqs[0], 0);
             CPU_ZERO(&cpusets[0]);
             CPU_SET(0, &cpusets[0]);
-            sched_setaffinity(getpid(), sizeof(cpu_set_t), &cpusets[0]);
+            sched_setaffinity(0, sizeof(cpu_set_t), &cpusets[0]);
         }
 
         opt_handler(&ctx);
