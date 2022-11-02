@@ -1,4 +1,5 @@
 #! /bin/bash
+set -e
 
 if [[ "$1" != "" ]]; then
     NIC=$1
@@ -12,6 +13,9 @@ queues=1
 if [[ "$2" != "" ]]; then
     queues=$2
 fi
+
+echo "Setting MTU..."
+ip link set dev $1 mtu 3498
 
 max_hw_rxq=`ethtool -g $1 | grep -m 1 RX: | awk '{print $2}'`
 max_hw_txq=`ethtool -g $1 | grep -m 1 TX: | awk '{print $2}'`
@@ -30,9 +34,12 @@ tx-scatter-gather off tx-vlan-stag-hw-insert off ntuple off rx-vlan-filter off \
 tx-gre-csum-segmentation off tx-tcp-mangleid-segmentation off txvlan off rx off \
 rxhash off tx-gre-segmentation off tx-tcp-segmentation off rx-all off rxvlan off \
 tx-gso-partial off tx-tcp6-segmentation off rx-checksumming off tx-checksumming off
-#ethtool --set-priv-flags $1 rx_cqe_moder off tx_cqe_moder off rx_cqe_compress off rx_striding_rq off rx_no_csum_complete off xdp_tx_mpwqe off skb_tx_mpwqe off tx_port_ts off
+#ethtool --set-priv-flags $1 rx_cqe_moder off tx_cqe_moder off rx_cqe_compress off \
+#                            rx_striding_rq off rx_no_csum_complete off xdp_tx_mpwqe off \
+#                            skb_tx_mpwqe off tx_port_ts off
 
 #echo "Setting PCI Max Read Request Size to 1024 (assuming one NIC port i.e. one PCI address)..."
+# commented because was causing some problem, I forgot which one, they are a lot! :(
 #pci=`ethtool -i $1 | grep 'bus-info:' | sed 's/bus-info: //'`
 #setpci -s $pci 68.w=3BCD
 

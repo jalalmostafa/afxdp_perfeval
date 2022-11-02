@@ -426,13 +426,12 @@ always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem, u32* umem_cursor)
     return 0;
 }
 
-always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
+always_inline int complete_tx_l2fwd(xsk_info* xsk, struct xsk_ring_prod* fq, struct xsk_ring_cons* cq)
 {
-    u32 rcvd, i;
-    u32 idx_rx = 0, idx_tx = 0, idx_cq = 0, idx_fq = 0;
+    u32 idx_cq = 0, idx_fq = 0, rcvd;
     int ret;
-    struct xsk_ring_prod* fq = umem->nbfqs != 1 ? xsk->fill_ring : &umem->fq0;
-    struct xsk_ring_cons* cq = umem->nbfqs != 1 ? xsk->comp_ring : &umem->cq0;
+    if (!xsk->outstanding_tx)
+        return 0;
 
     if (xsk->bind_flags & XDP_COPY) {
         xsk->stats.tx_wakeup_sendtos++;
@@ -440,7 +439,8 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
     }
 
     /* re-add completed Tx buffers */
-    rcvd = xsk_ring_cons__peek(cq, xsk->batch_size, &idx_cq);
+    size_t ndescs = (xsk->outstanding_tx > xsk->batch_size) ? xsk->batch_size : xsk->outstanding_tx;
+    rcvd = xsk_ring_cons__peek(cq, ndescs, &idx_cq);
     if (rcvd > 0) {
         ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
         while (ret != (int)rcvd) {
@@ -457,12 +457,26 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
             ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
         }
 
-        for (i = 0; i < rcvd; i++)
+        for (u32 i = 0; i < rcvd; i++)
             *xsk_ring_prod__fill_addr(fq, idx_fq++) = *xsk_ring_cons__comp_addr(cq, idx_cq++);
 
         xsk_ring_prod__submit(fq, rcvd);
         xsk_ring_cons__release(cq, rcvd);
+        xsk->outstanding_tx -= rcvd;
     }
+
+    return 0;
+}
+
+always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
+{
+    u32 rcvd, i;
+    u32 idx_rx = 0, idx_tx = 0;
+    int ret;
+    struct xsk_ring_prod* fq = umem->nbfqs != 1 ? xsk->fill_ring : &umem->fq0;
+    struct xsk_ring_cons* cq = umem->nbfqs != 1 ? xsk->comp_ring : &umem->cq0;
+
+    complete_tx_l2fwd(xsk, fq, cq);
 
     rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
     if (!rcvd) {
@@ -482,6 +496,8 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
             dlog_error2("xsk_ring_prod__reserve", ret);
             return ECOMM;
         }
+
+        complete_tx_l2fwd(xsk, fq, cq);
 
         if (xsk->busy_poll || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
             xsk->stats.tx_wakeup_sendtos++;
@@ -520,6 +536,7 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
     xsk_ring_cons__release(&xsk->rx, rcvd);
 
     xsk->stats.sent_frames += rcvd;
+    xsk->outstanding_tx += rcvd;
     return 0;
 }
 
