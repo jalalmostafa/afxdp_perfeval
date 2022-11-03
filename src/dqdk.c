@@ -801,6 +801,28 @@ typedef void* (*benchmark_handler_t)(void*);
 #define XDP_FILE_RR4 "./bpf/rr4.bpf.o"
 #define XDP_FILE_RR8 "./bpf/rr8.bpf.o"
 
+void dqdk_usage(char** argv)
+{
+    printf("Usage: %s -i <interface_name> -q <hardware_queue_id>\n", argv[0]);
+    printf("Arguments:\n");
+    printf("    -a <irq1,irq2,...>       Set affinity mapping between application threads and drivers queues e.g. q1 to irq1, q2 to irq2,...\n");
+    printf("    -d <duration>            Set the run duration in seconds. Default: 3 secs\n");
+    printf("    -i <interface>           Set NIC to work on\n");
+    printf("    -q <qid[-qid]>           Set range of hardware queues to work on e.g. -q 1 or -q 1-3. Specifying multiple queues will launch a thread for each queue except if -p poll\n");
+    printf("    -m <native|generic>      Set XDP mode to 'native' or 'generic'. Default: native\n");
+    printf("    -c                       Enforce XDP Copy mode, default is zero-copy mode\n");
+    printf("    -v                       Verbose\n");
+    printf("    -b <size>                Set batch size. Default: 64\n");
+    printf("    -w                       Use XDP need wakeup flag\n");
+    printf("    -p <poll|rtc>            Enforce poll or run-to-completion mode. Default: rtc\n");
+    printf("    -s <nb_xsks>             Set number of sockets working on shared umem\n");
+    printf("    -t <tx-packet-size>      Set txonly packet size\n");
+    printf("    -I <irq_string>          Read and count interrupts of interface from /proc/interrupts using its IRQ string\n");
+    printf("    -M <rxdrop|txonly|l2fwd> Set Microbenchmark. Default: rxdrop\n");
+    printf("    -B                       Enable NAPI busy-poll\n");
+    printf("    -D <dmac>                Set destination MAC address for txonly\n");
+}
+
 int main(int argc, char** argv)
 {
 #ifdef UDP_MODE
@@ -856,8 +878,16 @@ int main(int argc, char** argv)
     signal(SIGABRT, signal_handler);
     signal(SIGUSR1, signal_handler);
 
-    while ((opt = getopt(argc, argv, "a:b:cd:i:l:m:p:q:s:vwt:BI:M:D:")) != -1) {
+    if (argc == 1) {
+        dqdk_usage(argv);
+        return 0;
+    }
+
+    while ((opt = getopt(argc, argv, "a:b:cd:hi:l:m:p:q:s:vwt:BI:M:D:")) != -1) {
         switch (opt) {
+        case 'h':
+            dqdk_usage(argv);
+            return 0;
         case 'a':
             // mapping to queues is 1-to-1 e.g. first irq to first queue...
             opt_affinity = 1;
@@ -989,6 +1019,7 @@ int main(int argc, char** argv)
             }
             break;
         default:
+            dqdk_usage(argv);
             dlog_error("Invalid Arg\n");
             exit(EXIT_FAILURE);
         }
