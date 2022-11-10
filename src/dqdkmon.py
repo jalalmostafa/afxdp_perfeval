@@ -14,7 +14,7 @@ def perf_stat(pid, kernel='/home/jalal/linux-6.0.5'):
 
 
 def pidstat():
-    return subprocess.Popen(['/usr/bin/pidstat', '-G', 'dqdk|softirq', '-t', '1'],
+    return subprocess.Popen(['/usr/bin/pidstat', '-h', '-H', '-G', 'dqdk|softirq', '-t', '1'],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
@@ -61,11 +61,44 @@ def parse_perfstat(out):
 
 
 def parse_pidstat(out):
-    return pd.DataFrame()
+    lines = out.split('\n')[1:]
+    keys = None
+    pdata = {}
+    for l in lines:
+        if not l or 'Linux' in l or 'Average' in l:
+            continue
+
+        if 'Time' in l and len(pdata) == 0:
+            keys = l.split()
+            print('keys', keys)
+            pdata = {k: [] for k in keys}
+            continue
+
+        if 'softirq' in l:
+            if '|__' in l:
+                continue
+
+            values = l.split()
+            for i, v in enumerate(values):
+                k = keys[i]
+                pdata[k].append(v)
+        elif 'dqdk' in l:
+            values = l.split()
+            for i, v in enumerate(values):
+                k = keys[i]
+                if k == 'Command':
+                    v = v if '|__' not in v else '%s-%s' % (
+                        v.replace('|__', ''), values[3])
+
+                pdata[k].append(v)
+        else:
+            raise Exception(f'Not handled: {l}')
+
+    return pd.DataFrame(data=pdata)
 
 
 def merge_dqdk_perf(dqdk, perf):
-    return pd.DataFrame()
+    return pd.concat([dqdk, perf], axis=1)
 
 
 def parse_all(dqdk_out, perf_out, pidstat_out):
@@ -82,7 +115,6 @@ def parse_all(dqdk_out, perf_out, pidstat_out):
 
 
 if __name__ == '__main__':
-
     dqdk = subprocess.Popen(['./dqdk', ] + sys.argv[1:],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
