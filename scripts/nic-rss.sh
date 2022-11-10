@@ -13,8 +13,13 @@ for i in `ethtool -n $1 | grep Filter | awk '{print $2}' ORS=' '`; do
     ethtool -N $1 delete $i
 done
 
+if [[ "$2" == "clear" ]]; then
+	exit 0
+fi
+
 echo "Setting new rules..."
 combined=`ethtool -l $1 | tail -1 | awk '{print $2}'`
+echo "Discovered $combined queues..."
 
 case $combined in
     1)

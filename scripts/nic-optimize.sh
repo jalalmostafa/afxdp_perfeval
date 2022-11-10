@@ -60,6 +60,3 @@ else
     affinity="0-$lcpu"
     set_irq_affinity_cpulist.sh $affinity $1
 fi
-
-# echo 2 | tee "/sys/class/net/$1/napi_defer_hard_irqs"
-# echo 200000 | tee "/sys/class/net/$1/gro_flush_timeout"
