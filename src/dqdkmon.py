@@ -25,7 +25,7 @@ def parse_dqdk(out):
         if not l:
             continue
         key, value = l.strip().split(':')
-        pdata[key.strip()] = float(value.strip())
+        pdata[key.strip()] = [float(value.strip())]
     return pd.DataFrame(data=pdata)
 
 
@@ -61,17 +61,17 @@ def parse_perfstat(out):
 
 
 def parse_pidstat(out):
-    lines = out.split('\n')[1:]
+    lines = out.split('\n')
     keys = None
     pdata = {}
     for l in lines:
         if not l or 'Linux' in l or 'Average' in l:
             continue
-
-        if 'Time' in l and len(pdata) == 0:
-            keys = l.split()
-            print('keys', keys)
-            pdata = {k: [] for k in keys}
+        
+        if 'Time' in l:
+            if len(pdata) == 0:
+                keys = l.split()[1:]
+                pdata = {k: [] for k in keys}
             continue
 
         if 'softirq' in l:
@@ -104,7 +104,7 @@ def merge_dqdk_perf(dqdk, perf):
 def parse_all(dqdk_out, perf_out, pidstat_out):
     dqdk_df = parse_dqdk(dqdk_out.decode('ascii'))
     perf_df = parse_perfstat(perf_out.decode('ascii'))
-    pidstat_df = parse_perfstat(pidstat_out.decode('ascii'))
+    pidstat_df = parse_pidstat(pidstat_out.decode('ascii'))
 
     ts = datetime.datetime.now()
     df = merge_dqdk_perf(dqdk_df, perf_df)
