@@ -20,7 +20,11 @@ def pidstat():
 
 def parse_dqdk(out):
     pdata = {}
-    lines = out.split('Average Stats:')[1].split('\n')
+    lines = out.split('Average Stats:')
+    if len(lines) > 1:
+        lines = lines[1].split('\n')
+    else:
+        lines = out.split('Statistics:')[1].split('\n')
     for l in lines:
         if not l:
             continue
@@ -67,7 +71,7 @@ def parse_pidstat(out):
     for l in lines:
         if not l or 'Linux' in l or 'Average' in l:
             continue
-        
+
         if 'Time' in l:
             if len(pdata) == 0:
                 keys = l.split()[1:]
@@ -101,32 +105,47 @@ def merge_dqdk_perf(dqdk, perf):
     return pd.concat([dqdk, perf], axis=1)
 
 
-def parse_all(dqdk_out, perf_out, pidstat_out):
+def pcie_metrics(args):
+    cmd = f'pcm-pcie 1 -B'.split()
+    pcm = subprocess.Popen(cmd + [f'-csv=pcie-output-{args}.csv'],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    return pcm
+
+
+def parse_pcmpcie(out):
+    pass
+
+
+def parse_all(args, dqdk_out, perf_out, pidstat_out):
     dqdk_df = parse_dqdk(dqdk_out.decode('ascii'))
     perf_df = parse_perfstat(perf_out.decode('ascii'))
     pidstat_df = parse_pidstat(pidstat_out.decode('ascii'))
 
-    ts = datetime.datetime.now()
     df = merge_dqdk_perf(dqdk_df, perf_df)
-    dqdkperf_file = f'./dqdk-perf-{ts}.csv'
+    dqdkperf_file = f'./dqdk-perf-{args}.csv'
     df.to_csv(dqdkperf_file)
-    pidstat_file = f'./dqdk-pidstat-{ts}.csv'
+    pidstat_file = f'./dqdk-pidstat-{args}.csv'
     pidstat_df.to_csv(pidstat_file)
 
 
 if __name__ == '__main__':
-    dqdk = subprocess.Popen(['./dqdk', ] + sys.argv[1:],
+    dqdk_args = sys.argv[1:]
+    dqdk = subprocess.Popen(['./dqdk', ] + dqdk_args,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
+    args = ' '.join(dqdk_args)
+    pcm = pcie_metrics(args)
     perf = perf_stat(dqdk.pid)
     pstat = pidstat()
 
     dqdk.wait()
     pstat.send_signal(signal.SIGTERM)
     perf.wait()
+    pcm.send_signal(signal.SIGTERM)
 
     (dqdk_stdout, dqdk_stderr) = dqdk.communicate()
     (perf_stdout, perf_stderr) = perf.communicate()
     (pstat_stdout, pstat_stderr) = pstat.communicate()
+    (pcm_out, pcm_err) = pcm.communicate()
 
-    parse_all(dqdk_stdout, perf_stderr, pstat_stdout)
+    parse_all(args, dqdk_stdout, perf_stderr, pstat_stdout)
