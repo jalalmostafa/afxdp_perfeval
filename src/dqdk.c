@@ -805,10 +805,13 @@ void dqdk_usage(char** argv)
 {
     printf("Usage: %s -i <interface_name> -q <hardware_queue_id>\n", argv[0]);
     printf("Arguments:\n");
-    printf("    -a <irq1,irq2,...>       Set affinity mapping between application threads and drivers queues e.g. q1 to irq1, q2 to irq2,...\n");
+
+    printf("    -a <irq1,irq2,...>       Set affinity mapping between application threads and drivers queues\n");
+    printf("                             e.g. q1 to irq1, q2 to irq2,...\n");
     printf("    -d <duration>            Set the run duration in seconds. Default: 3 secs\n");
     printf("    -i <interface>           Set NIC to work on\n");
-    printf("    -q <qid[-qid]>           Set range of hardware queues to work on e.g. -q 1 or -q 1-3. Specifying multiple queues will launch a thread for each queue except if -p poll\n");
+    printf("    -q <qid[-qid]>           Set range of hardware queues to work on e.g. -q 1 or -q 1-3.\n");
+    printf("                             Specifying multiple queues will launch a thread for each queue except if -p poll\n");
     printf("    -m <native|generic>      Set XDP mode to 'native' or 'generic'. Default: native\n");
     printf("    -c                       Enforce XDP Copy mode, default is zero-copy mode\n");
     printf("    -v                       Verbose\n");
@@ -821,6 +824,8 @@ void dqdk_usage(char** argv)
     printf("    -M <rxdrop|txonly|l2fwd> Set Microbenchmark. Default: rxdrop\n");
     printf("    -B                       Enable NAPI busy-poll\n");
     printf("    -D <dmac>                Set destination MAC address for txonly\n");
+    printf("    -H                       Considering Hyper-threading is enabled, this flag will assign affinity\n");
+    printf("                             of softirq and the app to two logical cores of the same physical core.\n");
 }
 
 int main(int argc, char** argv)
@@ -851,7 +856,7 @@ int main(int argc, char** argv)
         .it_value.tv_sec = opt_duration.it_interval.tv_sec,
         .it_value.tv_nsec = 0
     };
-    u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1,
+    u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1, opt_hyperthreading = 0,
        opt_pollmode = DQDK_RCV_RTC, opt_affinity = 0, opt_busy_poll = 0;
     u16 opt_txpktsize = 64;
 
@@ -883,7 +888,7 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    while ((opt = getopt(argc, argv, "a:b:cd:hi:l:m:p:q:s:vwt:BI:M:D:")) != -1) {
+    while ((opt = getopt(argc, argv, "a:b:cd:hi:l:m:p:q:s:vwt:BI:M:D:H")) != -1) {
         switch (opt) {
         case 'h':
             dqdk_usage(argv);
@@ -1017,6 +1022,9 @@ int main(int argc, char** argv)
                 dlog_errorv("Invalid TX Packet Size %d (not between 64 and 4096)", opt_txpktsize);
                 exit(EXIT_FAILURE);
             }
+            break;
+        case 'H':
+            opt_hyperthreading = 1;
             break;
         default:
             dqdk_usage(argv);
@@ -1310,10 +1318,18 @@ int main(int argc, char** argv)
             if (opt_affinity) {
                 pthread_attr_init(attrs);
                 // Set process and interrupt affinity to same CPU
-                int cpu = i % nprocs;
-                nic_set_irq_affinity(opt_irqs[i], cpu);
+                int app_aff, irq_aff;
+                if (opt_hyperthreading) {
+                    irq_aff = 2 * i;
+                    app_aff = (2 * i) + 1;
+                } else {
+                    irq_aff = app_aff = i % nprocs;
+                }
+
+                nic_set_irq_affinity(opt_irqs[i], irq_aff);
+
                 CPU_ZERO(&cpusets[i]);
-                CPU_SET(cpu, &cpusets[i]);
+                CPU_SET(app_aff, &cpusets[i]);
                 ret = pthread_attr_setaffinity_np(attrs, sizeof(cpu_set_t), &cpusets[i]);
                 if (ret) {
                     dlog_error2("pthread_attr_setaffinity_np", ret);
@@ -1335,9 +1351,16 @@ int main(int argc, char** argv)
         memcpy(&ctx.dmac, opt_dmac, 6);
 
         if (opt_affinity) {
-            nic_set_irq_affinity(opt_irqs[0], 0);
+            int app_aff, irq_aff;
+            if (opt_hyperthreading) {
+                irq_aff = 0;
+                app_aff = 1;
+            } else {
+                irq_aff = app_aff = 0;
+            }
+            nic_set_irq_affinity(opt_irqs[0], irq_aff);
             CPU_ZERO(&cpusets[0]);
-            CPU_SET(0, &cpusets[0]);
+            CPU_SET(app_aff, &cpusets[0]);
             sched_setaffinity(0, sizeof(cpu_set_t), &cpusets[0]);
         }
 
