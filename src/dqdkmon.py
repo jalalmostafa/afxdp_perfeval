@@ -7,10 +7,16 @@ import pandas as pd
 
 
 def perf_stat(pid, kernel='/home/jalal/linux-6.0.5'):
-    return subprocess.Popen([f'{kernel}/tools/perf/perf', 'stat', '-e',
-                            'context-switches,cpu-migrations,cycles,instructions,LLC-loads,LLC-load-misses,LLC-stores,LLC-store-misses,dTLB-load-misses,iTLB-load-misses,raw_syscalls:sys_enter',
-                             '-p', str(pid)],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    cmd = [f'{kernel}/tools/perf/perf', 'stat', '-e',
+           'context-switches,cpu-migrations,cycles,instructions,LLC-loads,LLC-load-misses,LLC-stores,LLC-store-misses,dTLB-load-misses,iTLB-load-misses,raw_syscalls:sys_enter',
+           '-p', str(pid)]
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def perf_stat_cmd(cmd, kernel='/home/jalal/linux-6.0.5'):
+    cmd = [f'{kernel}/tools/perf/perf', 'stat', '-e',
+           'context-switches,cpu-migrations,cycles,instructions,LLC-loads,LLC-load-misses,LLC-stores,LLC-store-misses,dTLB-load-misses,iTLB-load-misses,raw_syscalls:sys_enter', ] + cmd
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def pidstat():
@@ -60,7 +66,7 @@ def parse_perfstat(out):
     pdata = {}
     for l in lines:
         if not l or 'Performance counter stats' in l or 'seconds time elapsed' in l \
-                or 'seconds user' in l or 'seconds sys' in l:
+                or 'seconds user' in l or 'seconds sys' in l or 'libbpf' in l:
             continue
 
         brokenl = l.split('#')
@@ -108,12 +114,14 @@ def parse_pidstat(out):
 
     return pd.DataFrame(data=pdata)
 
+
 def pidstat_flatten(pidstat):
     pidstat_agg = pidstat.groupby('Command').mean(numeric_only=True)
     pidstat_agg.drop_duplicates()
     flattened = pidstat_agg.unstack().to_frame().sort_index(level=1).T
     flattened.columns = flattened.columns.map('_'.join)
     return flattened
+
 
 def pcmpcie_flatten(pcie):
     pcie_agg = pcie.mean(numeric_only=True)
@@ -152,21 +160,23 @@ def parse_all(args, dqdk_out, perf_out, pidstat_out):
 
 if __name__ == '__main__':
     dqdk_args = sys.argv[1:]
-    dqdk = subprocess.Popen(['./dqdk', ] + dqdk_args,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    dqdk_cmd = ['./dqdk', ] + dqdk_args
+    # dqdk = subprocess.Popen(dqdk_cmd,
+    #                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     args = ' '.join(dqdk_args)
+
+    perf = perf_stat_cmd(dqdk_cmd)
     pcm = pcie_metrics(args)
-    perf = perf_stat(dqdk.pid)
     pstat = pidstat()
 
-    dqdk.wait()
-    pstat.send_signal(signal.SIGTERM)
+    # dqdk.wait()
     perf.wait()
+    pstat.send_signal(signal.SIGTERM)
     pcm.send_signal(signal.SIGTERM)
 
-    (dqdk_stdout, dqdk_stderr) = dqdk.communicate()
+    # (dqdk_stdout, dqdk_stderr) = dqdk.communicate()
     (perf_stdout, perf_stderr) = perf.communicate()
     (pstat_stdout, pstat_stderr) = pstat.communicate()
     (pcm_out, pcm_err) = pcm.communicate()
 
-    parse_all(args, dqdk_stdout, perf_stderr, pstat_stdout)
+    parse_all(args, perf_stdout, perf_stderr, pstat_stdout)
