@@ -4,12 +4,12 @@ import signal
 import sys
 import subprocess
 import pandas as pd
-import datetime
 
 
 def perf_stat(pid, kernel='/home/jalal/linux-6.0.5'):
-    return subprocess.Popen([f'{kernel}/tools/perf/perf',
-                             'stat', '-d', '-d', '-d', '-p', str(pid)],
+    return subprocess.Popen([f'{kernel}/tools/perf/perf', 'stat', '-e',
+                            'context-switches,cpu-migrations,cycles,instructions,LLC-loads,LLC-load-misses,LLC-stores,LLC-store-misses,dTLB-load-misses,iTLB-load-misses,raw_syscalls:sys_enter',
+                             '-p', str(pid)],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
@@ -25,11 +25,13 @@ def parse_dqdk(out):
         lines = lines[1].split('\n')
     else:
         lines = out.split('Statistics:')[1].split('\n')
+
     for l in lines:
         if not l:
             continue
         key, value = l.strip().split(':')
         pdata[key.strip()] = [float(value.strip())]
+
     return pd.DataFrame(data=pdata)
 
 
@@ -46,21 +48,27 @@ def parse_perfstat(out):
             value, key = s1data
             return key, value.replace(',', '')
         elif len(s1data) == 3:
+            value, key, _ = s1data
+            return key, value.replace(',', '')
+        elif len(s1data) == 4:
             value, unit, key = s1data
             return key, value.replace(',', '') + unit
         else:
             raise Exception(f'Not Handled: {s1}')
+
     lines = out.split('\n')
     pdata = {}
     for l in lines:
         if not l or 'Performance counter stats' in l or 'seconds time elapsed' in l \
                 or 'seconds user' in l or 'seconds sys' in l:
             continue
+
         brokenl = l.split('#')
         s1 = brokenl[0].strip()
-        if s1:
-            k, v = _parse_s1(s1)
-            pdata[k] = [v]
+        if not s1:
+            continue
+        k, v = _parse_s1(s1)
+        pdata[k] = [v]
     return pd.DataFrame(data=pdata)
 
 
@@ -124,9 +132,9 @@ def parse_all(args, dqdk_out, perf_out, pidstat_out):
 
     df = merge_dqdk_perf(dqdk_df, perf_df)
     dqdkperf_file = f'./dqdk-perf-{args}.csv'
-    df.to_csv(dqdkperf_file)
+    df.to_csv(dqdkperf_file, index=False)
     pidstat_file = f'./dqdk-pidstat-{args}.csv'
-    pidstat_df.to_csv(pidstat_file)
+    pidstat_df.to_csv(pidstat_file, index=False)
 
 
 if __name__ == '__main__':
