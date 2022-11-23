@@ -108,9 +108,22 @@ def parse_pidstat(out):
 
     return pd.DataFrame(data=pdata)
 
+def pidstat_flatten(pidstat):
+    pidstat_agg = pidstat.groupby('Command').mean(numeric_only=True)
+    pidstat_agg.drop_duplicates()
+    flattened = pidstat_agg.unstack().to_frame().sort_index(level=1).T
+    flattened.columns = flattened.columns.map('_'.join)
+    return flattened
 
-def merge_dqdk_perf(dqdk, perf):
-    return pd.concat([dqdk, perf], axis=1)
+def pcmpcie_flatten(pcie):
+    pcie_agg = pcie.mean(numeric_only=True)
+    return pcie_agg.to_frame().T
+
+
+def merge_all(dqdk, perf, pidstat, pcie):
+    pidstat_fltned = pidstat_flatten(pidstat)
+    pcie_fltned = pcmpcie_flatten(pcie)
+    return pd.concat([dqdk, perf, pidstat_fltned, pcie_fltned], axis=1)
 
 
 def pcie_metrics(args):
@@ -129,12 +142,12 @@ def parse_all(args, dqdk_out, perf_out, pidstat_out):
     dqdk_df = parse_dqdk(dqdk_out.decode('ascii'))
     perf_df = parse_perfstat(perf_out.decode('ascii'))
     pidstat_df = parse_pidstat(pidstat_out.decode('ascii'))
+    pcie_df = pd.read_csv(f'./pcie-output-{args}.csv')
 
-    df = merge_dqdk_perf(dqdk_df, perf_df)
-    dqdkperf_file = f'./dqdk-perf-{args}.csv'
-    df.to_csv(dqdkperf_file, index=False)
-    pidstat_file = f'./dqdk-pidstat-{args}.csv'
-    pidstat_df.to_csv(pidstat_file, index=False)
+    df = merge_all(dqdk_df, perf_df, pidstat_df, pcie_df)
+    df.to_csv(f'./dqdk-all-{args}.csv', index=False)
+
+    pidstat_df.to_csv(f'./dqdk-pidstat-{args}.csv', index=False)
 
 
 if __name__ == '__main__':
