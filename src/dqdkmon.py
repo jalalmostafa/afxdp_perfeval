@@ -153,13 +153,15 @@ def pcie_metrics(args):
 
     return pcm
 
+def parse_pcie(df):
+    return df[::2].astype(float)
 
 def parse_all(args, dqdk_out, perf_out, pidstat_out):
     dqdk_df = parse_dqdk(dqdk_out.decode('ascii'))
     perf_df = parse_perfstat(perf_out.decode('ascii'))
     pidstat_df = parse_pidstat(pidstat_out.decode('ascii'))
     pcie_df = pd.read_csv(f'./pcie-output-{args}.csv')
-
+    pcie_df = parse_pcie(pcie_df)
     df = merge_all(dqdk_df, perf_df, pidstat_df, pcie_df)
     df.to_csv(f'./dqdk-all-{args}.csv', index=False)
 
