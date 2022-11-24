@@ -48,6 +48,7 @@ struct xsk_stat {
     u64 timeout_polls;
     u64 rx_empty_polls;
     u64 rx_fill_fail_polls;
+    u64 rx_successful_fills;
     u64 invalid_ip_pkts;
     u64 invalid_udp_pkts;
     u64 runtime;
@@ -322,7 +323,7 @@ always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
 
         ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
     }
-
+    xsk->stats.rx_successful_fills++;
     for (int i = 0; i < rcvd; i++) {
         u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
 #ifdef UMEM_UNALIGNED
@@ -759,6 +760,7 @@ void stats_dump(struct xsk_stat* stats)
            "    Failed Polls:             %llu\n"
            "    Timeout Polls:            %llu\n"
            "    XSK Fill Fail Polls:      %llu\n"
+           "    XSK Successful Fills:     %llu\n"
            "    XSK RXQ Empty:            %llu\n"
            "    XSK TXQ Need Wakeup:      %llu\n"
            "    X-XSK RX Dropped:         %llu\n"
@@ -772,10 +774,10 @@ void stats_dump(struct xsk_stat* stats)
         AVG_PPS(stats->rcvd_pkts, stats->runtime), stats->sent_frames,
         AVG_PPS(stats->sent_frames, stats->runtime),
 
-        stats->invalid_ip_pkts,
-        stats->invalid_udp_pkts, stats->fail_polls, stats->timeout_polls,
-        stats->rx_fill_fail_polls, stats->rx_empty_polls,
-        stats->tx_wakeup_sendtos,
+        stats->invalid_ip_pkts, stats->invalid_udp_pkts,
+        stats->fail_polls, stats->timeout_polls,
+        stats->rx_fill_fail_polls, stats->rx_successful_fills,
+        stats->rx_empty_polls, stats->tx_wakeup_sendtos,
 
         stats->xstats.rx_dropped, stats->xstats.rx_fill_ring_empty_descs,
         stats->xstats.rx_invalid_descs, stats->xstats.rx_ring_full,
@@ -1387,6 +1389,7 @@ int main(int argc, char** argv)
         avg_stats.rx_fill_fail_polls += xsks[i].stats.rx_fill_fail_polls;
         avg_stats.timeout_polls += xsks[i].stats.timeout_polls;
         avg_stats.tx_wakeup_sendtos += xsks[i].stats.tx_wakeup_sendtos;
+        avg_stats.rx_successful_fills += xsks[i].stats.rx_successful_fills;
 
         avg_stats.xstats.rx_dropped += xsks[i].stats.xstats.rx_dropped;
         avg_stats.xstats.rx_invalid_descs += xsks[i].stats.xstats.rx_invalid_descs;
@@ -1404,7 +1407,6 @@ int main(int argc, char** argv)
         printf("Average Stats:\n");
         stats_dump(&avg_stats);
     }
-
 cleanup:
     if (after_interrupts != NULL && before_interrupts != NULL) {
         u32 sum = 0;
