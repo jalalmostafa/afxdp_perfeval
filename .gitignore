@@ -72,4 +72,4 @@ dqdk
 xdpsock*
 *.ipynb
 *.csv
-
+*.trashinfo

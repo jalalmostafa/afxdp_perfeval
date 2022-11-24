@@ -49,6 +49,7 @@ struct xsk_stat {
     u64 rx_empty_polls;
     u64 rx_fill_fail_polls;
     u64 rx_successful_fills;
+    u64 tx_successful_fills;
     u64 invalid_ip_pkts;
     u64 invalid_udp_pkts;
     u64 runtime;
@@ -414,6 +415,7 @@ always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem, u32* umem_cursor)
         desc->len = len;
     }
 
+    xsk->stats.tx_successful_fills++;
     xsk_ring_prod__submit(&xsk->tx, xsk->batch_size);
     xsk->stats.sent_frames += xsk->batch_size;
     xsk->outstanding_tx += xsk->batch_size;
@@ -507,6 +509,8 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
         ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
     }
 
+    xsk->stats.tx_successful_fills++;
+    xsk->stats.rx_successful_fills++;
     for (i = 0; i < rcvd; i++) {
         u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
         u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++)->len;
@@ -760,7 +764,8 @@ void stats_dump(struct xsk_stat* stats)
            "    Failed Polls:             %llu\n"
            "    Timeout Polls:            %llu\n"
            "    XSK Fill Fail Polls:      %llu\n"
-           "    XSK Successful Fills:     %llu\n"
+           "    XSK RX Successful Fills:  %llu\n"
+           "    XSK TX Successful Fills:  %llu\n"
            "    XSK RXQ Empty:            %llu\n"
            "    XSK TXQ Need Wakeup:      %llu\n"
            "    X-XSK RX Dropped:         %llu\n"
@@ -776,8 +781,8 @@ void stats_dump(struct xsk_stat* stats)
 
         stats->invalid_ip_pkts, stats->invalid_udp_pkts,
         stats->fail_polls, stats->timeout_polls,
-        stats->rx_fill_fail_polls, stats->rx_successful_fills,
-        stats->rx_empty_polls, stats->tx_wakeup_sendtos,
+        stats->rx_fill_fail_polls, stats->rx_successful_fills, 
+        stats->tx_successful_fills, stats->rx_empty_polls, stats->tx_wakeup_sendtos,
 
         stats->xstats.rx_dropped, stats->xstats.rx_fill_ring_empty_descs,
         stats->xstats.rx_invalid_descs, stats->xstats.rx_ring_full,
@@ -1390,6 +1395,7 @@ int main(int argc, char** argv)
         avg_stats.timeout_polls += xsks[i].stats.timeout_polls;
         avg_stats.tx_wakeup_sendtos += xsks[i].stats.tx_wakeup_sendtos;
         avg_stats.rx_successful_fills += xsks[i].stats.rx_successful_fills;
+        avg_stats.tx_successful_fills += xsks[i].stats.tx_successful_fills;
 
         avg_stats.xstats.rx_dropped += xsks[i].stats.xstats.rx_dropped;
         avg_stats.xstats.rx_invalid_descs += xsks[i].stats.xstats.rx_invalid_descs;
