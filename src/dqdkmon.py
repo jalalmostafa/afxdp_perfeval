@@ -110,17 +110,29 @@ def parse_pidstat(out):
 
                 pdata[k].append(v)
         else:
-            raise Exception(f'Not handled: {l}')
+            print('pidstat', f'Not handled: {l}')
 
     return pd.DataFrame(data=pdata)
 
 
 def pidstat_flatten(pidstat):
-    pidstat_agg = pidstat.groupby('Command').mean(numeric_only=True)
-    pidstat_agg.drop_duplicates()
+    pidstat[['%usr','%system','%guest','%wait','%CPU','CPU']] = pidstat[['%usr','%system','%guest','%wait','%CPU','CPU']].astype(float)
+    pidstat_agg = pidstat[['%usr','%system','%guest','%wait','%CPU','CPU','Command']].groupby('Command').mean(numeric_only=True)
     flattened = pidstat_agg.unstack().to_frame().sort_index(level=1).T
     flattened.columns = flattened.columns.map('_'.join)
-    return flattened
+    return flattened.drop(flattened.filter(like='_dqdk-', axis=1), axis=1)
+
+
+def parse_allpidstats():
+    import pandas as pd
+    import glob
+    alldf = pd.DataFrame()
+    for f in glob.glob('./dqdk-pidstat*'):
+        df = pd.read_csv(f)
+        agg = pidstat_flatten(df)
+        agg['File'] = f
+        alldf = pd.concat([alldf, agg, ], axis=0)
+    alldf.to_csv('./alldf-pidstat.csv', index=False)
 
 
 def pcmpcie_flatten(pcie):
@@ -140,10 +152,6 @@ def pcie_metrics(args):
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     return pcm
-
-
-def parse_pcmpcie(out):
-    pass
 
 
 def parse_all(args, dqdk_out, perf_out, pidstat_out):
