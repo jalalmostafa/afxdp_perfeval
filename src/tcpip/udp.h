@@ -35,11 +35,14 @@ always_inline int udp_audit_checksum(struct udphdr* udp, u32 src_ip, u32 dst_ip,
 
     u16 rcvd_csum = udp->check;
     udp->check = 0;
-    return udp_csum(src_ip, dst_ip, udplen, IPPROTO_UDP, (u16*)udp) == rcvd_csum;
+    u16 calc_csum = udp_csum(src_ip, dst_ip, udplen, IPPROTO_UDP, (u16*)udp);
+    printf("calc_csum: %hu - rcvd_csum: %hu\n", calc_csum, rcvd_csum);
+    return calc_csum == rcvd_csum;
 }
 
 always_inline int udp_audit(struct udphdr* udp, u32 src_ip, u32 dst_ip, u16 udplen)
 {
+    printf("udp->len %d != ntohs(udp->len): %d != udplen %d\n", udp->len, ntohs(udp->len), udplen);
     if (ntohs(udp->len) != udplen || !udp_audit_checksum(udp, src_ip, dst_ip, udplen)) {
         return 0;
     }
@@ -108,7 +111,8 @@ always_inline void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr, u16 pkts
     /* UDP header */
     udp_hdr->source = htons(0x1000);
     udp_hdr->dest = htons(0x1000);
-    udp_hdr->len = htons(pktsize);
+    u16 udplen = pktsize - ETH_HDR_SIZE - ip4_get_header_size(ip_hdr);
+    udp_hdr->len = htons(udplen);
 
     pktgen_hdr->pgh_magic = htonl(PKTGEN_MAGIC);
 
@@ -117,7 +121,7 @@ always_inline void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr, u16 pkts
 
     /* UDP header checksum */
     udp_hdr->check = 0;
-    udp_hdr->check = udp_csum(ip_hdr->saddr, ip_hdr->daddr, pktsize, IPPROTO_UDP, (u16*)udp_hdr);
+    udp_hdr->check = udp_csum(ip_hdr->saddr, ip_hdr->daddr, udplen, IPPROTO_UDP, (u16*)udp_hdr);
 }
 
 #endif

@@ -17,9 +17,7 @@ always_inline int ip4_audit_checksum(struct iphdr* hdr)
 
 always_inline int ip4_audit(struct iphdr* hdr, u16 actual_pkt_len)
 {
-    u16 theo_pkt_len = ntohs(hdr->tot_len);
-
-    if (actual_pkt_len != theo_pkt_len || !ip4_audit_checksum(hdr)) {
+    if (actual_pkt_len != ntohs(hdr->tot_len) || !ip4_audit_checksum(hdr)) {
         return 0;
     }
 
