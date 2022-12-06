@@ -781,7 +781,7 @@ void stats_dump(struct xsk_stat* stats)
 
         stats->invalid_ip_pkts, stats->invalid_udp_pkts,
         stats->fail_polls, stats->timeout_polls,
-        stats->rx_fill_fail_polls, stats->rx_successful_fills, 
+        stats->rx_fill_fail_polls, stats->rx_successful_fills,
         stats->tx_successful_fills, stats->rx_empty_polls, stats->tx_wakeup_sendtos,
 
         stats->xstats.rx_dropped, stats->xstats.rx_fill_ring_empty_descs,
@@ -1449,14 +1449,16 @@ cleanup:
             xsk_info xsk = xsks[i];
             xsk_socket__delete(xsk.socket);
 
-            if (xsk.umem_info->nbfqs != 1) {
-                free(xsk.fill_ring);
-                free(xsk.comp_ring);
-            }
+            if (xsk.umem_info != NULL) {
+                if (xsk.umem_info->nbfqs != 1) {
+                    free(xsk.fill_ring);
+                    free(xsk.comp_ring);
+                }
 
-            if (!opt_shared_umem && xsk.umem_info != NULL) {
-                umem_info_free(xsk.umem_info);
-                free(xsk.umem_info);
+                if (!opt_shared_umem) {
+                    umem_info_free(xsk.umem_info);
+                    free(xsk.umem_info);
+                }
             }
         }
         free(xsks);
