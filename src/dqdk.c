@@ -754,9 +754,9 @@ void stats_dump(struct xsk_stat* stats)
 {
     printf("    Total runtime (ns):       %llu\n"
            "    Received Frames:          %llu\n"
-           "    Average RX FPS:           %f\n"
+           "    Average RX L2 PPS:        %f\n"
            "    Received Packets:         %llu\n"
-           "    Average RX PPS:           %f\n"
+           "    Average RX L3 PPS:        %f\n"
            "    Sent Frames:              %llu\n"
            "    Average TX Frames:        %f\n"
            "    Invalid L3 Packets:       %llu\n"
