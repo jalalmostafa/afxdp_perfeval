@@ -15,6 +15,14 @@
 
 #include "dlog.h"
 
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+#define DQDK_BIG_ENDIAN 0
+#elif __BYTE_ORDER == __BIG_ENDIAN
+#define DQDK_BIG_ENDIAN 1
+#else
+#error "Unknown byte order"
+#endif
+
 typedef __u8 u8;
 typedef __u16 u16;
 typedef __u32 u32;

@@ -36,13 +36,13 @@ always_inline int udp_audit_checksum(struct udphdr* udp, u32 src_ip, u32 dst_ip,
     u16 rcvd_csum = udp->check;
     udp->check = 0;
     u16 calc_csum = udp_csum(src_ip, dst_ip, udplen, IPPROTO_UDP, (u16*)udp);
-    printf("calc_csum: %hu - rcvd_csum: %hu\n", calc_csum, rcvd_csum);
+    // printf("calc_csum: %hu - rcvd_csum: %hu\n", calc_csum, rcvd_csum);
     return calc_csum == rcvd_csum;
 }
 
 always_inline int udp_audit(struct udphdr* udp, u32 src_ip, u32 dst_ip, u16 udplen)
 {
-    printf("udp->len %d != ntohs(udp->len): %d != udplen %d\n", udp->len, ntohs(udp->len), udplen);
+    // printf("ntohs(udp->len): %d != udplen %d\n", ntohs(udp->len), udplen);
     if (ntohs(udp->len) != udplen || !udp_audit_checksum(udp, src_ip, dst_ip, udplen)) {
         return 0;
     }
@@ -101,8 +101,8 @@ always_inline void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr, u16 pkts
     ip_hdr->frag_off = 0;
     ip_hdr->ttl = IPDEFTTL;
     ip_hdr->protocol = IPPROTO_UDP;
-    ip_hdr->daddr = htonl(0x0a0a0a10);
-    ip_hdr->saddr = htonl(0xc0a80a01);
+    ip_hdr->saddr = htonl(0xc0a80a67);
+    ip_hdr->daddr = htonl(0xc0a80a01);
 
     /* IP header checksum */
     ip_hdr->check = 0;

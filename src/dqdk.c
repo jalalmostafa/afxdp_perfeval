@@ -31,6 +31,7 @@
 #include <string.h>
 #include <numaif.h>
 
+// #include <rte_memcpy.h>
 #include "dqdk.h"
 #include "tcpip/ipv4.h"
 #include "tcpip/udp.h"
@@ -47,6 +48,7 @@
 
 #define UMEM_FLAGS_USE_HGPG (1 << 0)
 #define UMEM_FLAGS_UNALIGNED (1 << 1)
+#define LARGE_MEMSZ ((u64)100 * 1024 * 1024 * 1024)
 
 struct xsk_stat {
     u64 rcvd_frames;
@@ -92,6 +94,8 @@ typedef struct {
     u16 tx_pkt_size;
     u32 outstanding_tx;
     struct xsk_stat stats;
+    u8* large_mem;
+
 } xsk_info;
 
 volatile u32 break_flag = 0;
@@ -260,7 +264,7 @@ static void pktgen_fill_umem(umem_info* umem, u8* dmac, u8* smac, u32 to, u16 pk
     }
 }
 
-always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len)
+always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len, u32* datalen)
 {
     struct ethhdr* frame = (struct ethhdr*)buffer;
     u16 ethertype = ntohs(frame->h_proto);
@@ -284,17 +288,19 @@ always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len)
     u32 iphdrsz = ip4_get_header_size(packet);
     u32 udplen = ntohs(packet->tot_len) - iphdrsz;
     struct udphdr* udp = (struct udphdr*)(((u8*)packet) + iphdrsz);
+    // if (!udp_audit(packet, iphdrsz, udp, udplen)) {
+    // udp_audit(struct udphdr* udp, u32 src_ip, u32 dst_ip, u16 udplen)
     if (!udp_audit(udp, packet->saddr, packet->daddr, udplen)) {
         xsk->stats.invalid_udp_pkts++;
         return NULL;
     }
-
+    *datalen = udplen;
     return (u8*)(udp + 1);
 }
 
-always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
+static always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
 {
-    u32 idx_rx = 0, idx_fq = 0;
+    u32 idx_rx = 0, idx_fq = 0, datalen = 0;
     struct xsk_ring_prod* fq = umem->nbfqs == 1 ? &umem->fq0 : xsk->fill_ring;
 
     int rcvd = xsk_ring_cons__peek(&xsk->rx, xsk->batch_size, &idx_rx);
@@ -337,9 +343,8 @@ always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
 #ifdef UDP_MODE
         u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
         u8* frame = xsk_umem__get_data(umem->buffer, addr);
-        u8* data = process_frame(xsk, frame, len);
-
-        (void)data;
+        u8* data = process_frame(xsk, frame, len, &datalen);
+        memcpy(xsk->large_mem, data, datalen);
 #else
         xsk_umem__get_data(umem->buffer, addr);
 #endif
@@ -1353,12 +1358,13 @@ int main(int argc, char** argv)
     if (opt_irqstring != NULL) {
         before_interrupts = nic_get_interrupts(opt_irqstring, nprocs);
     }
+    // large_mem = huge_malloc(LARGE_MEMSZ);
 
     for (u32 i = 0; i < nbxsks; i++) {
         xsks[i].tx_pkt_size = opt_txpktsize;
         xsks[i].batch_size = opt_batchsize;
         xsks[i].busy_poll = opt_busy_poll;
-
+        xsks[i].large_mem = malloc(4096);
         xsks[i].libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
         xsks[i].bind_flags = (opt_zcopy ? XDP_ZEROCOPY : XDP_COPY)
             | (opt_needs_wakeup ? XDP_USE_NEED_WAKEUP : 0);
@@ -1578,6 +1584,11 @@ cleanup:
                     umem_info_free(xsk.umem_info);
                     free(xsk.umem_info);
                 }
+            }
+
+            if (xsk.large_mem != NULL) {
+                // munmap(large_mem, LARGE_MEMSZ);
+                free(xsk.large_mem);
             }
         }
         free(xsks);
