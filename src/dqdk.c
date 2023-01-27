@@ -252,8 +252,9 @@ static int fq_ring_configure(xsk_info* xsk)
 static void pktgen_fill_umem(umem_info* umem, u8* dmac, u8* smac, u32 to, u16 pkt_size)
 {
     u8 pkt_data[FRAME_SIZE];
-    udp_create_frame(pkt_data, dmac, smac, pkt_size);
+    udp_create_frame(pkt_data, dmac, smac, pkt_size - ETH_FCS_SIZE);
     for (u32 i = 0; i < to; i++) {
+        // udp_create_frame(pkt_data, dmac, smac, pkt_size - ETH_FCS_SIZE);
         u8* slot = xsk_umem__get_data(umem->buffer, i * FRAME_SIZE);
         memcpy(slot, pkt_data, pkt_size);
     }
@@ -408,11 +409,10 @@ always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem, u32* umem_cursor)
     }
 
     u32 base = umem->nbfqs != 1 ? xsk->index * UMEM_SIZE : 0;
-    u32 len = xsk->tx_pkt_size - ETH_FCS_SIZE;
     for (u32 i = 0; i < xsk->batch_size; i++) {
         struct xdp_desc* desc = xsk_ring_prod__tx_desc(&xsk->tx, idx + i);
         desc->addr = base + ((*umem_cursor + i) * FRAME_SIZE);
-        desc->len = len;
+        desc->len = xsk->tx_pkt_size - ETH_FCS_SIZE;
     }
 
     xsk->stats.tx_successful_fills++;

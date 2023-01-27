@@ -101,8 +101,8 @@ always_inline void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr, u16 pkts
     ip_hdr->frag_off = 0;
     ip_hdr->ttl = IPDEFTTL;
     ip_hdr->protocol = IPPROTO_UDP;
-    ip_hdr->saddr = htonl(0x0a0a0a10);
-    ip_hdr->daddr = htonl(0x0a0a0a20);
+    ip_hdr->daddr = htonl(0x0a0a0a10);
+    ip_hdr->saddr = htonl(0xc0a80a01);
 
     /* IP header checksum */
     ip_hdr->check = 0;
