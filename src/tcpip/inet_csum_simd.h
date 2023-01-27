@@ -29,6 +29,11 @@
 // POSSIBILITY OF SUCH DAMAGE.
 // FROM: https://github.com/NetSys/bess/blob/1d8f708fec00e14cf1d840adebd588a8137dcac8/core/utils/checksum.h
 
+
+// Other references: 
+// https://stackoverflow.com/questions/60108658/
+// https://stackoverflow.com/questions/63106143/
+
 #ifndef DQDK_INET_CSUM_SIMD_H
 #define DQDK_INET_CSUM_SIMD_H
 
