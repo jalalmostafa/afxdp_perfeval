@@ -813,26 +813,26 @@ void dqdk_usage(char** argv)
     printf("Usage: %s -i <interface_name> -q <hardware_queue_id>\n", argv[0]);
     printf("Arguments:\n");
 
-    printf("    -a <irq1,irq2,...>       Set affinity mapping between application threads and drivers queues\n");
-    printf("                             e.g. q1 to irq1, q2 to irq2,...\n");
-    printf("    -d <duration>            Set the run duration in seconds. Default: 3 secs\n");
-    printf("    -i <interface>           Set NIC to work on\n");
-    printf("    -q <qid[-qid]>           Set range of hardware queues to work on e.g. -q 1 or -q 1-3.\n");
-    printf("                             Specifying multiple queues will launch a thread for each queue except if -p poll\n");
-    printf("    -m <native|generic>      Set XDP mode to 'native' or 'generic'. Default: native\n");
-    printf("    -c                       Enforce XDP Copy mode, default is zero-copy mode\n");
-    printf("    -v                       Verbose\n");
-    printf("    -b <size>                Set batch size. Default: 64\n");
-    printf("    -w                       Use XDP need wakeup flag\n");
-    printf("    -p <poll|rtc>            Enforce poll or run-to-completion mode. Default: rtc\n");
-    printf("    -s <nb_xsks>             Set number of sockets working on shared umem\n");
-    printf("    -t <tx-packet-size>      Set txonly packet size\n");
-    printf("    -I <irq_string>          Read and count interrupts of interface from /proc/interrupts using its IRQ string\n");
-    printf("    -M <rxdrop|txonly|l2fwd> Set Microbenchmark. Default: rxdrop\n");
-    printf("    -B                       Enable NAPI busy-poll\n");
-    printf("    -D <dmac>                Set destination MAC address for txonly\n");
-    printf("    -H                       Considering Hyper-threading is enabled, this flag will assign affinity\n");
-    printf("                             of softirq and the app to two logical cores of the same physical core.\n");
+    printf("    -a <irq1,irq2,...>           Set affinity mapping between application threads and drivers queues\n");
+    printf("                                 e.g. q1 to irq1, q2 to irq2,...\n");
+    printf("    -d <duration>                Set the run duration in seconds. Default: 3 secs\n");
+    printf("    -i <interface>               Set NIC to work on\n");
+    printf("    -q <qid[-qid]>               Set range of hardware queues to work on e.g. -q 1 or -q 1-3.\n");
+    printf("                                 Specifying multiple queues will launch a thread for each queue except if -p poll\n");
+    printf("    -m <native|offload|generic>  Set XDP mode to 'native', 'offload', or 'generic'. Default: native\n");
+    printf("    -c                           Enforce XDP Copy mode, default is zero-copy mode\n");
+    printf("    -v                           Verbose\n");
+    printf("    -b <size>                    Set batch size. Default: 64\n");
+    printf("    -w                           Use XDP need wakeup flag\n");
+    printf("    -p <poll|rtc>                Enforce poll or run-to-completion mode. Default: rtc\n");
+    printf("    -s <nb_xsks>                 Set number of sockets working on shared umem\n");
+    printf("    -t <tx-packet-size>          Set txonly packet size\n");
+    printf("    -I <irq_string>              Read and count interrupts of interface from /proc/interrupts using its IRQ string\n");
+    printf("    -M <rxdrop|txonly|l2fwd>     Set Microbenchmark. Default: rxdrop\n");
+    printf("    -B                           Enable NAPI busy-poll\n");
+    printf("    -D <dmac>                    Set destination MAC address for txonly\n");
+    printf("    -H                           Considering Hyper-threading is enabled, this flag will assign affinity\n");
+    printf("                                 of softirq and the app to two logical cores of the same physical core.\n");
 }
 
 int main(int argc, char** argv)
@@ -963,6 +963,8 @@ int main(int argc, char** argv)
                 opt_mode = XDP_MODE_NATIVE;
             } else if (strcmp("generic", optarg) == 0) {
                 opt_mode = XDP_MODE_SKB;
+            } else if (strcmp("offload", optarg) == 0) {
+                opt_mode = XDP_MODE_HW;
             } else {
                 dlog_error("Invalid XDP Mode");
                 exit(EXIT_FAILURE);
