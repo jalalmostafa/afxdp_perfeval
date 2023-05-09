@@ -1328,6 +1328,7 @@ int main(int argc, char** argv)
                 pthread_attr_init(attrs);
                 // Set process and interrupt affinity to same CPU
                 int app_aff, irq_aff;
+                // FIXME: this is incorrect logic. hyperthreads are necessarily contiguous.
                 if (opt_hyperthreading) {
                     irq_aff = 2 * i;
                     app_aff = (2 * i) + 1;
@@ -1361,6 +1362,7 @@ int main(int argc, char** argv)
 
         if (opt_affinity) {
             int app_aff, irq_aff;
+            // FIXME: this is incorrect logic. hyperthreads are necessarily contiguous.
             if (opt_hyperthreading) {
                 irq_aff = 0;
                 app_aff = 1;
