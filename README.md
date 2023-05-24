@@ -4,12 +4,12 @@
 
 For Ubuntu
 ```bash
-apt install clang llvm libelf-dev libpcap-dev gcc-multilib build-essential linux-tools-common linux-tools-generic linux-headers-$(uname -r)
+apt install clang llvm libelf-dev libpcap-dev gcc-multilib build-essential linux-tools-common linux-tools-generic linux-headers-$(uname -r) m4
 ```
 
 For RHEL/CentOS
 ```bash
-sudo yum --enablerepo=powertools install llvm clang elfutils-libelf-devel libpcap-devel
+sudo yum --enablerepo=powertools install llvm clang elfutils-libelf-devel libpcap-devel m4
 ```
 
 ```bash

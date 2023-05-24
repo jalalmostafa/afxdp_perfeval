@@ -2,6 +2,36 @@
 
 ## Build
 
+1. Install a recent DPDK release e.g.
+
+```bash
+git clone https://dpdk.org/git/dpdk
+sudo rm -fr /usr/local/lib/x86_64-linux-gnu # DPDK changed a number of lib names and need to clean up
+cd dpdk
+git checkout v23.03
+meson build
+ninja -C build
+sudo ninja -C build install
+sudo ldconfig  # make sure ld.so is pointing new DPDK libraries
+```
+
+2. Install the corresponding `pktgen-dpdk `
+
+```bash
+git clone http://dpdk.org/git/apps/pktgen-dpdk
+cd pktgen-dpdk
+git checkout pktgen-23.03.0
+make
+or
+make build    # Same as 'make'
+or
+make rebuild  # Rebuild Pktgen, which removes the Builddir then builds it again via meson/ninja
+or
+make rebuildlua # to enable Lua builds
+or
+make rebuildgui # to enable GUI builds with GTK
+```
+
 ## DPDK Configuration
 
 
@@ -56,7 +86,7 @@
 
     It is also important that the device(s) you want to pass through are in a separate IOMMU group. This can be checked with: `find /sys/kernel/iommu_groups/ -type l`
 
-13. Everything ok? Bind the device to DPDK drivers if needed. Mellanox PMD does not device binding.
+13. Everything ok? Bind the device to DPDK drivers if needed. **Mellanox PMD does not device binding**.
     ```
     # set link down
     ip link set dev enp2s0np0 down
@@ -64,3 +94,7 @@
     ```
 
 ## Run
+
+1. Copy and edit the config file at `scripts/cfg/pktgen-setup.sh` to `pktgen-dpdk/cfg`
+2. Copy `pktgen-40G` to `pktgen-dpdk`
+3. Run `tools/run.py` in pktgen-dpdk
