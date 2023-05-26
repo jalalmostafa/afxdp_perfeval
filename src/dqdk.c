@@ -839,12 +839,6 @@ int main(int argc, char** argv)
     dlog_info("RX_DROP Compilation!");
 #endif
 
-#ifdef NO_HGPG
-    dlog_info("NO_HGPG Compilation!");
-#else
-    dlog_info("HGPG Compilation!");
-#endif
-
     // options values
     char *opt_ifname = NULL, *opt_irqstring = NULL;
     u8 opt_dmac[6] = { 0 };
@@ -1032,10 +1026,10 @@ int main(int argc, char** argv)
             opt_hyperthreading = 1;
             break;
         case 'G':
-            opt_umem_flags &= UMEM_FLAGS_USE_HGPG;
+            opt_umem_flags |= UMEM_FLAGS_USE_HGPG;
             break;
         case 'u':
-            opt_umem_flags &= UMEM_FLAGS_UNALIGNED;
+            opt_umem_flags |= UMEM_FLAGS_UNALIGNED;
             break;
         // case 'l':
         //     opt_umemlen = atoi(optarg);
