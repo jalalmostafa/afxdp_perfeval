@@ -30,7 +30,7 @@ tx-udp-segmentation off gso off rx-gro-list off tso off tx-ipxip6-segmentation o
 tx-udp_tnl-csum-segmentation off hw-tc-offload off rx-vlan-stag-filter off \
 rx-udp-gro-forwarding off tx off tx-nocache-copy off tx-udp_tnl-segmentation off \
 lro off rx-udp_tunnel-port-offload off tx-checksum-ip-generic off \
-tx-scatter-gather off tx-vlan-stag-hw-insert off ntuple off rx-vlan-filter off \
+tx-scatter-gather off tx-vlan-stag-hw-insert off ntuple on rx-vlan-filter off \
 tx-gre-csum-segmentation off tx-tcp-mangleid-segmentation off txvlan off rx off \
 rxhash off tx-gre-segmentation off tx-tcp-segmentation off rx-all off rxvlan off \
 tx-gso-partial off tx-tcp6-segmentation off rx-checksumming off tx-checksumming off

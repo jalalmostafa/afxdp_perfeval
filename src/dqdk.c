@@ -97,7 +97,7 @@ static void* umem_buffer_create(u32 size, u8 flags)
     return flags & UMEM_FLAGS_USE_HGPG ? huge_malloc(size) : mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 }
 
-static umem_info* umem_info_create(u32 nbfqs, u8 size, u8 flags)
+static umem_info* umem_info_create(u32 nbfqs, u32 size, u8 flags)
 {
     umem_info* info = (umem_info*)calloc(1, sizeof(umem_info));
 
@@ -331,9 +331,9 @@ always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
         }
 
 #ifdef UDP_MODE
-            u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
-            u8* frame = xsk_umem__get_data(umem->buffer, addr);
-            u8* data = process_frame(xsk, frame, len);
+        u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
+        u8* frame = xsk_umem__get_data(umem->buffer, addr);
+        u8* data = process_frame(xsk, frame, len);
 
         (void)data;
 #else
