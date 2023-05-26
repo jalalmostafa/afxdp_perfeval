@@ -9,9 +9,7 @@ USER_LIBS       := -lpthread
 MAN_PAGE        :=
 
 ## add USER_DEFINES=-Dflag to make to build daq with some flag where flag can be:
-##    NO_HGPG           Disable Hugepages
 ##    UDP_MODE          L3/L4 checksumming
-##    UMEM_UNALIGNED    Use unaligned memory
 ##
 USER_DEFINES    +=
 CFLAGS          += -I$(realpath .) $(USER_DEFINES)

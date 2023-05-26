@@ -41,6 +41,9 @@
 #define FILLQ_LEN UMEM_LEN
 #define COMPQ_LEN XSK_RING_PROD__DEFAULT_NUM_DESCS
 
+#define UMEM_FLAGS_USE_HGPG (1 << 0)
+#define UMEM_FLAGS_UNALIGNED (1 << 1)
+
 struct xsk_stat {
     u64 rcvd_frames;
     u64 rcvd_pkts;
@@ -65,6 +68,7 @@ typedef struct {
     u32 nbfqs;
     u32 size;
     void* buffer;
+    u8 flags;
 } umem_info;
 
 typedef struct {
@@ -88,22 +92,17 @@ typedef struct {
 
 u32 break_flag = 0;
 
-static void* umem_buffer_create(u32 size)
+static void* umem_buffer_create(u32 size, u8 flags)
 {
-#ifdef NO_HGPG
-    return mmap(NULL, size, PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#else
-    return huge_malloc(size);
-#endif
+    return flags & UMEM_FLAGS_USE_HGPG ? huge_malloc(size) : mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 }
 
-static umem_info* umem_info_create(u32 nbfqs)
+static umem_info* umem_info_create(u32 nbfqs, u8 size, u8 flags)
 {
     umem_info* info = (umem_info*)calloc(1, sizeof(umem_info));
 
-    info->size = UMEM_SIZE * nbfqs;
-    info->buffer = umem_buffer_create(info->size);
+    info->size = size * nbfqs;
+    info->buffer = umem_buffer_create(info->size, flags);
     if (info->buffer == NULL) {
         dlog_error2("umem_buffer_create", 0);
         return NULL;
@@ -111,6 +110,7 @@ static umem_info* umem_info_create(u32 nbfqs)
 
     info->umem = NULL;
     info->nbfqs = nbfqs;
+    info->flags = flags;
     return info;
 }
 
@@ -136,11 +136,7 @@ static int umem_configure(umem_info* umem)
         .comp_size = COMPQ_LEN,
         .frame_size = XSK_UMEM__DEFAULT_FRAME_SIZE,
         .frame_headroom = XSK_UMEM__DEFAULT_FRAME_HEADROOM,
-#ifdef UMEM_UNALIGNED
-        .flags = XDP_UMEM_UNALIGNED_CHUNK_FLAG
-#else
-        .flags = 0
-#endif
+        .flags = umem->flags & UMEM_FLAGS_UNALIGNED ? XDP_UMEM_UNALIGNED_CHUNK_FLAG : 0
     };
 
     ret = xsk_umem__create(&umem->umem, umem->buffer, umem->size,
@@ -327,25 +323,26 @@ always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
     }
     xsk->stats.rx_successful_fills++;
     for (int i = 0; i < rcvd; i++) {
-        u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
-#ifdef UMEM_UNALIGNED
-        u64 orig = xsk_umem__extract_addr(addr);
-        addr = xsk_umem__add_offset_to_addr(addr);
-#endif
+        u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr, orig;
+
+        if (umem->flags & UMEM_FLAGS_UNALIGNED) {
+            orig = xsk_umem__extract_addr(addr);
+            addr = xsk_umem__add_offset_to_addr(addr);
+        }
 
 #ifdef UDP_MODE
-        u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
-        u8* frame = xsk_umem__get_data(umem->buffer, addr);
-        u8* data = process_frame(xsk, frame, len);
+            u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
+            u8* frame = xsk_umem__get_data(umem->buffer, addr);
+            u8* data = process_frame(xsk, frame, len);
 
         (void)data;
 #else
         xsk_umem__get_data(umem->buffer, addr);
 #endif
         idx_rx++;
-#ifdef UMEM_UNALIGNED
-        *xsk_ring_prod__fill_addr(fq, idx_fq) = orig;
-#endif
+        if (umem->flags & UMEM_FLAGS_UNALIGNED) {
+            *xsk_ring_prod__fill_addr(fq, idx_fq) = orig;
+        }
         idx_fq++;
     }
 
@@ -512,13 +509,14 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
     xsk->stats.tx_successful_fills++;
     xsk->stats.rx_successful_fills++;
     for (i = 0; i < rcvd; i++) {
-        u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
+        u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr, orig;
         u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++)->len;
 
-#ifdef UMEM_UNALIGNED
-        u64 orig = addr;
-        addr = xsk_umem__add_offset_to_addr(addr);
-#endif
+        if (umem->flags & UMEM_FLAGS_UNALIGNED) {
+            orig = addr;
+            addr = xsk_umem__add_offset_to_addr(addr);
+        }
+
         char* pkt = xsk_umem__get_data(umem->buffer, addr);
         struct ether_header* eth = (struct ether_header*)pkt;
         struct ether_addr* src_addr = (struct ether_addr*)&eth->ether_shost;
@@ -529,11 +527,7 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
         *src_addr = *dst_addr;
         *dst_addr = tmp;
 
-#ifdef UMEM_UNALIGNED
-        xsk_ring_prod__tx_desc(&xsk->tx, idx_tx)->addr = orig;
-#else
-        xsk_ring_prod__tx_desc(&xsk->tx, idx_tx)->addr = addr;
-#endif
+        xsk_ring_prod__tx_desc(&xsk->tx, idx_tx)->addr = umem->flags & UMEM_FLAGS_UNALIGNED ? orig : addr;
         xsk_ring_prod__tx_desc(&xsk->tx, idx_tx++)->len = len;
     }
 
@@ -812,13 +806,11 @@ void dqdk_usage(char** argv)
 {
     printf("Usage: %s -i <interface_name> -q <hardware_queue_id>\n", argv[0]);
     printf("Arguments:\n");
-
-    printf("    -a <irq1,irq2,...>           Set affinity mapping between application threads and drivers queues\n");
-    printf("                                 e.g. q1 to irq1, q2 to irq2,...\n");
     printf("    -d <duration>                Set the run duration in seconds. Default: 3 secs\n");
     printf("    -i <interface>               Set NIC to work on\n");
     printf("    -q <qid[-qid]>               Set range of hardware queues to work on e.g. -q 1 or -q 1-3.\n");
     printf("                                 Specifying multiple queues will launch a thread for each queue except if -p poll\n");
+    // printf("    -l <umem_length>             UMEM number of frames (should be power of 2). Default: 4096\n");
     printf("    -m <native|offload|generic>  Set XDP mode to 'native', 'offload', or 'generic'. Default: native\n");
     printf("    -c                           Enforce XDP Copy mode, default is zero-copy mode\n");
     printf("    -v                           Verbose\n");
@@ -827,12 +819,16 @@ void dqdk_usage(char** argv)
     printf("    -p <poll|rtc>                Enforce poll or run-to-completion mode. Default: rtc\n");
     printf("    -s <nb_xsks>                 Set number of sockets working on shared umem\n");
     printf("    -t <tx-packet-size>          Set txonly packet size\n");
+    printf("    -u                           Use unaligned memory for UMEM\n");
+    printf("    -A <irq1,irq2,...>           Set affinity mapping between application threads and drivers queues\n");
+    printf("                                 e.g. q1 to irq1, q2 to irq2,...\n");
     printf("    -I <irq_string>              Read and count interrupts of interface from /proc/interrupts using its IRQ string\n");
     printf("    -M <rxdrop|txonly|l2fwd>     Set Microbenchmark. Default: rxdrop\n");
     printf("    -B                           Enable NAPI busy-poll\n");
     printf("    -D <dmac>                    Set destination MAC address for txonly\n");
     printf("    -H                           Considering Hyper-threading is enabled, this flag will assign affinity\n");
     printf("                                 of softirq and the app to two logical cores of the same physical core.\n");
+    printf("    -G                           Activate Huge Pages for UMEM allocation\n");
 }
 
 int main(int argc, char** argv)
@@ -864,12 +860,12 @@ int main(int argc, char** argv)
         .it_value.tv_nsec = 0
     };
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1, opt_hyperthreading = 0,
-       opt_pollmode = DQDK_RCV_RTC, opt_affinity = 0, opt_busy_poll = 0;
+       opt_pollmode = DQDK_RCV_RTC, opt_affinity = 0, opt_busy_poll = 0, opt_umem_flags = 0;
     u16 opt_txpktsize = 64;
 
     // program variables
     int ifindex, ret, opt;
-    u32 nbqueues = 0, nbirqs = 0, nprocs = get_nprocs();
+    u32 nbqueues = 0, nbirqs = 0, nprocs = get_nprocs(), umem_size = UMEM_SIZE;
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
     interrupts_t *before_interrupts = NULL, *after_interrupts = NULL;
     struct xdp_program* kern_prog = NULL;
@@ -895,12 +891,12 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    while ((opt = getopt(argc, argv, "a:b:cd:hi:l:m:p:q:s:vwt:BI:M:D:H")) != -1) {
+    while ((opt = getopt(argc, argv, "b:cd:hi:l:m:p:q:s:uvwt:A:BI:M:D:HG")) != -1) {
         switch (opt) {
         case 'h':
             dqdk_usage(argv);
             return 0;
-        case 'a':
+        case 'A':
             // mapping to queues is 1-to-1 e.g. first irq to first queue...
             opt_affinity = 1;
             if (strchr(optarg, ',') == NULL) {
@@ -1035,6 +1031,19 @@ int main(int argc, char** argv)
         case 'H':
             opt_hyperthreading = 1;
             break;
+        case 'G':
+            opt_umem_flags &= UMEM_FLAGS_USE_HGPG;
+            break;
+        case 'u':
+            opt_umem_flags &= UMEM_FLAGS_UNALIGNED;
+            break;
+        // case 'l':
+        //     opt_umemlen = atoi(optarg);
+        //     if (opt_umemlen < 4096 && is_power_of_2(opt_umemlen)) {
+        //         dlog_errorv("Invalid UMEM length %d. Should be larger than 4096 and multiple of 2", opt_osilayer);
+        //         exit(EXIT_FAILURE);
+        //     }
+        //     break;
         default:
             dqdk_usage(argv);
             dlog_error("Invalid Arg\n");
@@ -1046,6 +1055,9 @@ int main(int argc, char** argv)
         dlog_error("Invalid interface name or number of queues");
         goto cleanup;
     }
+
+    opt_umem_flags& UMEM_FLAGS_USE_HGPG ? dlog_info("Huge pages are activated!") : dlog_info("No huge pages are used!");
+    opt_umem_flags& UMEM_FLAGS_UNALIGNED ? dlog_info("Unaligned UMEM is activated!") : dlog_info("Unaligned UMEM is NOT activated!");
 
     struct ifaddrs* addrs = NULL;
     getifaddrs(&addrs);
@@ -1216,7 +1228,7 @@ int main(int argc, char** argv)
     }
 
     if (opt_shared_umem > 1) {
-        shared_umem = nbqueues != 1 ? umem_info_create(nbxsks) : umem_info_create(1);
+        shared_umem = nbqueues != 1 ? umem_info_create(nbxsks, umem_size, opt_umem_flags) : umem_info_create(1, umem_size, opt_umem_flags);
         umem_configure(shared_umem);
     }
 
@@ -1250,7 +1262,7 @@ int main(int argc, char** argv)
         if (opt_shared_umem > 1) {
             xsks[i].umem_info = shared_umem;
         } else {
-            xsks[i].umem_info = umem_info_create(1);
+            xsks[i].umem_info = umem_info_create(1, umem_size, opt_umem_flags);
             umem_configure(xsks[i].umem_info);
         }
 
@@ -1495,7 +1507,8 @@ cleanup:
             free(shared_umem);
         }
     }
-#ifdef NO_HGPG
-    set_hugepages(0);
-#endif
+
+    if (opt_umem_flags & UMEM_FLAGS_USE_HGPG) {
+        set_hugepages(0);
+    }
 }
