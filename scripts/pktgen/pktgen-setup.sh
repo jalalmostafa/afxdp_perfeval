@@ -12,13 +12,15 @@ if [[ -z $1 ]]; then
     exit 1
 fi
 
+NIC=$1
+
 # low latency setup
 echo "Disabling Real-time Throttling..."
 echo -1 > /proc/sys/kernel/sched_rt_runtime_us
 
 # NIC setup
 echo "Disabling NIC Pausing..."
-ethtool -A $1 rx off tx off
+ethtool -A $NIC rx off tx off
 
 echo "Optimizing Virtual Memory Usage..."
 sysctl -w vm.zone_reclaim_mode=0
