@@ -60,6 +60,7 @@ else
     # echo "Run 'lscpu | grep -i numa' to get CPU lists"
 fi
 
+echo "Optimizing Mellanox Card..."
 mlxconfig -d $PORT_PCI_ADDRESS set CQE_COMPRESSION=1
 
 # echo "Setting PCI Max Read Request Size to 1024 (assuming one NIC port i.e. one PCI address)..."
