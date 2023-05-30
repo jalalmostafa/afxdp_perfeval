@@ -33,7 +33,8 @@
 #include "tcpip/ipv4.h"
 #include "tcpip/udp.h"
 
-#define UMEM_LEN (XSK_RING_PROD__DEFAULT_NUM_DESCS * 2)
+#define UMEM_FACTOR 2
+#define UMEM_LEN (XSK_RING_PROD__DEFAULT_NUM_DESCS * UMEM_FACTOR)
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 
 #define MAX_QUEUES 16
@@ -822,7 +823,7 @@ void dqdk_usage(char** argv)
     printf("    -u                           Use unaligned memory for UMEM\n");
     printf("    -A <irq1,irq2,...>           Set affinity mapping between application threads and drivers queues\n");
     printf("                                 e.g. q1 to irq1, q2 to irq2,...\n");
-    printf("    -I <irq_string>              Read and count interrupts of interface from /proc/interrupts using its IRQ string\n");
+    printf("    -I <irq_string>              `grep` regex to read and count interrupts of interface from /proc/interrupts\n");
     printf("    -M <rxdrop|txonly|l2fwd>     Set Microbenchmark. Default: rxdrop\n");
     printf("    -B                           Enable NAPI busy-poll\n");
     printf("    -D <dmac>                    Set destination MAC address for txonly\n");
