@@ -37,10 +37,14 @@ tx-gso-partial off tx-tcp6-segmentation off rx-checksumming off tx-checksumming 
 #                            rx_striding_rq off rx_no_csum_complete off xdp_tx_mpwqe off \
 #                            skb_tx_mpwqe off tx_port_ts off
 
-#echo "Setting PCI Max Read Request Size to 1024 (assuming one NIC port i.e. one PCI address)..."
-# commented because was causing some problem, I forgot which one, they are a lot! :(
-#pci=`ethtool -i $1 | grep 'bus-info:' | sed 's/bus-info: //'`
-#setpci -s $pci 68.w=3BCD
+read -p "Set PCI MaxReadReq to 1024? [y/n]..." answer
+if [ "$answer" = "y" ]; then
+    # https://enterprise-support.nvidia.com/s/article/understanding-pcie-configuration-for-maximum-performance
+    r68w=`setpci -s $pci 68.w`
+    new_r68w="3${r68w:1}"
+    echo "Old 68.w=$r68w. New 68.w=$new_r68w"
+    setpci -s $pci 68.w=$new_r68w
+fi
 
 echo "Optimizing Virtual Memory Usage..."
 sysctl -w vm.zone_reclaim_mode=0

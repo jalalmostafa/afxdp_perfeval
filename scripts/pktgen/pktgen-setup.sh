@@ -60,12 +60,21 @@ else
     # echo "Run 'lscpu | grep -i numa' to get CPU lists"
 fi
 
-echo "Optimizing Mellanox Card..."
-mlxconfig -d $PORT_PCI_ADDRESS set CQE_COMPRESSION=1
+pci=`ethtool -i $NIC | grep 'bus-info:' | sed 's/bus-info: //'`
 
-# echo "Setting PCI Max Read Request Size to 1024 (assuming one NIC port i.e. one PCI address)..."
-# pci=`ethtool -i $1 | grep 'bus-info:' | sed 's/bus-info: //'`
-# setpci -s $pci 68.w=3BCD
+read -p "Optimize Mellanox Card? [y/n]..." answer
+if [ "$answer" = "y" ]; then
+    mlxconfig -d $pci set CQE_COMPRESSION=1
+fi
+
+read -p "Set PCI MaxReadReq to 1024? [y/n]..." answer
+if [ "$answer" = "y" ]; then
+    # https://enterprise-support.nvidia.com/s/article/understanding-pcie-configuration-for-maximum-performance
+    r68w=`setpci -s $pci 68.w`
+    new_r68w="3${r68w:1}"
+    echo "Old 68.w=$r68w. New 68.w=$new_r68w"
+    setpci -s $pci 68.w=$new_r68w
+fi
 
 # huge pages
 echo "Configuring huge pages..."
