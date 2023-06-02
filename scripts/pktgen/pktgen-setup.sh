@@ -17,6 +17,7 @@ NIC=$1
 # low latency setup
 echo "Disabling Real-time Throttling..."
 echo -1 > /proc/sys/kernel/sched_rt_runtime_us
+echo -1 > /proc/sys/kernel/sched_rt_period_us
 
 # NIC setup
 echo "Disabling NIC Pausing..."
@@ -65,6 +66,7 @@ pci=`ethtool -i $NIC | grep 'bus-info:' | sed 's/bus-info: //'`
 read -p "Optimize Mellanox Card? [y/n]..." answer
 if [ "$answer" = "y" ]; then
     mlxconfig -d $pci set CQE_COMPRESSION=1
+    mlxconfig -d $pci set PCI_WR_ORDERING=1
 fi
 
 read -p "Set PCI MaxReadReq to 1024? [y/n]..." answer
