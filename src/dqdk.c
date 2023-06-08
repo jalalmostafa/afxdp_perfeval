@@ -854,14 +854,7 @@ u32 dqdk_calc_affinity(int irq, int ht, int samecore, unsigned long* cpumask)
             dlog_error("Hyper-Threading is not enabled but is chosen in the configuration");
             return (u32)-1;
         }
-        printf("hthreading %d\n", ht);
-        if (samecore)
-            app_aff = irq_aff;
-        else {
-            printf("before cpu_smt_sibling\n");
-            app_aff = cpu_smt_sibling(irq_aff);
-        }
-        // app_aff = samecore ? irq_aff : cpu_smt_sibling(irq_aff);
+        app_aff = samecore ? irq_aff : cpu_smt_sibling(irq_aff);
     } else {
         if (smt) {
             dlog_error("Hyper-Threading is enabled but not chosen in the configuration");
@@ -925,7 +918,7 @@ int main(int argc, char** argv)
     };
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1, opt_hyperthreading = 0,
        opt_pollmode = DQDK_RCV_RTC, opt_samecore = 0, opt_busy_poll = 0,
-       opt_umem_flags = 0;
+       opt_umem_flags = 0, opt_selnumanode = 0;
     u16 opt_txpktsize = 64;
 
     // program variables
@@ -949,6 +942,7 @@ int main(int argc, char** argv)
     int is_numa = 0;
     int driver_numa_node;
     unsigned long cpu_mask = 0;
+    u8 selnumanode = 0;
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -960,7 +954,7 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    while ((opt = getopt(argc, argv, "b:cd:hi:m:p:q:s:uvwt:A:BI:M:D:HGS")) != -1) {
+    while ((opt = getopt(argc, argv, "b:cd:hi:m:p:q:s:uvwt:A:BI:M:D:HGSN:")) != -1) {
         switch (opt) {
         case 'h':
             dqdk_usage(argv);
@@ -1108,6 +1102,10 @@ int main(int argc, char** argv)
         case 'S':
             opt_samecore = 1;
             break;
+        case 'N':
+            selnumanode = 1;
+            opt_selnumanode = atoi(optarg);
+            break;
         default:
             dqdk_usage(argv);
             dlog_error("Invalid Arg\n");
@@ -1122,15 +1120,19 @@ int main(int argc, char** argv)
 
     driver_numa_node = nic_numa_node(opt_ifname);
     is_numa = numa_available();
-    // TODO: Across-NUMA evaluation
     if (is_numa < 0) {
         nprocs = get_nprocs();
-    } else if (driver_numa_node != -1) {
-        numa_exit_on_error = 1;
-        dlog_infov("NUMA is detected! NUMA-node of %s is %d", opt_ifname, driver_numa_node);
+    } else {
+        dlog_infov("NUMA is detected! %s is owned by node %d", opt_ifname, driver_numa_node);
+
+        if (selnumanode)
+            driver_numa_node = opt_selnumanode;
+        else if (driver_numa_node == -1)
+            driver_numa_node = 0; // failure to get numa node or PCI is equidistant to all NUMA nodes => assign node0
+
+        dlog_infov("Selected NUMA node is %d", driver_numa_node);
 
         numa_set_bind_policy(1);
-
         struct bitmask* nodemask = numa_allocate_nodemask();
         struct bitmask* fromnodemask = numa_allocate_nodemask();
 
@@ -1149,7 +1151,7 @@ int main(int argc, char** argv)
         cpu_mask = *cpumask->maskp;
         numa_free_cpumask(cpumask);
         nprocs = popcountl(cpu_mask);
-        dlog_infov("NUMA CPU Mask is %lx of %d CPUs", cpu_mask, nprocs);
+        dlog_infov("NUMA CPU Mask is %#010lX of %d CPUs", cpu_mask, nprocs);
     }
 
     opt_umem_flags& UMEM_FLAGS_USE_HGPG ? dlog_info("Huge pages are activated!") : dlog_info("No huge pages are used!");
