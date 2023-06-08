@@ -16,12 +16,12 @@ fi
 echo "Setting MTU..."
 ip link set dev $NIC mtu 3498
 
-max_hw_rxq=`ethtool -g $NIC | grep -m 1 RX: | awk '{print $2}'`
-max_hw_txq=`ethtool -g $NIC | grep -m 1 TX: | awk '{print $2}'`
+# max_hw_rxq=`ethtool -g $NIC | grep -m 1 RX: | awk '{print $2}'`
+# max_hw_txq=`ethtool -g $NIC | grep -m 1 TX: | awk '{print $2}'`
 
 echo "ethtool-based Optimizations"
 ethtool -A $NIC tx off rx off
-ethtool -G $NIC tx $max_hw_txq rx $max_hw_rxq
+# ethtool -G $NIC tx $max_hw_txq rx $max_hw_rxq
 ethtool -L $NIC combined $queues
 ethtool -C $NIC adaptive-rx off adaptive-tx off rx-usecs 0
 ethtool -K $NIC gro off rx-fcs off sg off tx-ipxip4-segmentation off rx-checksumming off tx-checksumming off \
@@ -37,14 +37,14 @@ tx-gso-partial off tx-tcp6-segmentation off rx-checksumming off tx-checksumming 
 #                            rx_striding_rq off rx_no_csum_complete off xdp_tx_mpwqe off \
 #                            skb_tx_mpwqe off tx_port_ts off
 
-read -p "Set PCI MaxReadReq to 1024? [y/n]..." answer
-if [ "$answer" = "y" ]; then
-    # https://enterprise-support.nvidia.com/s/article/understanding-pcie-configuration-for-maximum-performance
-    r68w=`setpci -s $pci 68.w`
-    new_r68w="3${r68w:1}"
-    echo "Old 68.w=$r68w. New 68.w=$new_r68w"
-    setpci -s $pci 68.w=$new_r68w
-fi
+# read -p "Set PCI MaxReadReq to 1024? [y/n]..." answer
+# if [ "$answer" = "y" ]; then
+#     # https://enterprise-support.nvidia.com/s/article/understanding-pcie-configuration-for-maximum-performance
+#     r68w=`setpci -s $pci 68.w`
+#     new_r68w="3${r68w:1}"
+#     echo "Old 68.w=$r68w. New 68.w=$new_r68w"
+#     setpci -s $pci 68.w=$new_r68w
+# fi
 
 echo "Optimizing Virtual Memory Usage..."
 sysctl -w vm.zone_reclaim_mode=0

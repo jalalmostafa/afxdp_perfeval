@@ -28,6 +28,8 @@
 #include <sys/types.h>
 #include <ifaddrs.h>
 #include <netpacket/packet.h>
+#include <string.h>
+#include <numaif.h>
 
 #include "dqdk.h"
 #include "tcpip/ipv4.h"
@@ -38,6 +40,7 @@
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 
 #define MAX_QUEUES 16
+
 #define UMEM_SIZE (UMEM_LEN * FRAME_SIZE)
 #define FILLQ_LEN UMEM_LEN
 #define COMPQ_LEN XSK_RING_PROD__DEFAULT_NUM_DESCS
@@ -93,17 +96,17 @@ typedef struct {
 
 u32 break_flag = 0;
 
-static void* umem_buffer_create(u32 size, u8 flags)
+static void* umem_buffer_create(u32 size, u8 flags, int driver_numa)
 {
-    return flags & UMEM_FLAGS_USE_HGPG ? huge_malloc(size) : mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return flags & UMEM_FLAGS_USE_HGPG ? huge_malloc(driver_numa, size) : mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 }
 
-static umem_info* umem_info_create(u32 nbfqs, u32 size, u8 flags)
+static umem_info* umem_info_create(u32 nbfqs, u32 size, u8 flags, int driver_numa)
 {
     umem_info* info = (umem_info*)calloc(1, sizeof(umem_info));
 
     info->size = size * nbfqs;
-    info->buffer = umem_buffer_create(info->size, flags);
+    info->buffer = umem_buffer_create(info->size, flags, driver_numa);
     if (info->buffer == NULL) {
         dlog_error2("umem_buffer_create", 0);
         return NULL;
@@ -830,6 +833,72 @@ void dqdk_usage(char** argv)
     printf("    -H                           Considering Hyper-threading is enabled, this flag will assign affinity\n");
     printf("                                 of softirq and the app to two logical cores of the same physical core.\n");
     printf("    -G                           Activate Huge Pages for UMEM allocation\n");
+    printf("    -S                           Run IRQ and App on same core\n");
+}
+
+int dqdk_get_next_core(unsigned long* mask)
+{
+    int ret = ffsll(*mask);
+    *mask = *mask & (0xffffffffffffffff << ret);
+    return ret - 1;
+}
+
+u32 dqdk_calc_affinity(int irq, int ht, int samecore, unsigned long* cpumask)
+{
+    u32 affinity = 0;
+    u16 app_aff = 0, irq_aff = dqdk_get_next_core(cpumask);
+    int smt = is_smt();
+
+    if (ht) {
+        if (!smt) {
+            dlog_error("Hyper-Threading is not enabled but is chosen in the configuration");
+            return (u32)-1;
+        }
+        printf("hthreading %d\n", ht);
+        if (samecore)
+            app_aff = irq_aff;
+        else {
+            printf("before cpu_smt_sibling\n");
+            app_aff = cpu_smt_sibling(irq_aff);
+        }
+        // app_aff = samecore ? irq_aff : cpu_smt_sibling(irq_aff);
+    } else {
+        if (smt) {
+            dlog_error("Hyper-Threading is enabled but not chosen in the configuration");
+            return (u32)-1;
+        }
+        app_aff = samecore ? irq_aff : irq_aff + 1;
+    }
+    dlog_infov("IRQ(%d) Affinity=%d and Thread Afinity=%d", irq, irq_aff, app_aff);
+    affinity = ((irq_aff << 16) & 0xffff0000) | (app_aff & 0x0000ffff);
+    return affinity;
+}
+
+#define DQDK_APP_AFFINITY(x) ((u16)(x & 0x0000ffff))
+#define DQDK_IRQ_AFFINITY(x) ((u16)(x >> 16) & 0x0000ffff)
+
+int dqdk_set_affinity(int ht, int samecore, int irq, unsigned long* cpumask, cpu_set_t* cpuset, pthread_attr_t* attrs)
+{
+    u32 affinity = dqdk_calc_affinity(irq, ht, samecore, cpumask);
+    int ret;
+
+    if (affinity == (u32)-1) {
+        return -1;
+    }
+
+    nic_set_irq_affinity(irq, DQDK_IRQ_AFFINITY(affinity));
+
+    CPU_ZERO(cpuset);
+    CPU_SET(DQDK_APP_AFFINITY(affinity), cpuset);
+    if (attrs) {
+        ret = pthread_attr_setaffinity_np(attrs, sizeof(cpu_set_t), cpuset);
+        if (ret) {
+            dlog_error2("pthread_attr_setaffinity_np", ret);
+        }
+        return ret;
+    }
+
+    return sched_setaffinity(0, sizeof(cpu_set_t), cpuset);
 }
 
 int main(int argc, char** argv)
@@ -855,12 +924,13 @@ int main(int argc, char** argv)
         .it_value.tv_nsec = 0
     };
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1, opt_hyperthreading = 0,
-       opt_pollmode = DQDK_RCV_RTC, opt_affinity = 0, opt_busy_poll = 0, opt_umem_flags = 0;
+       opt_pollmode = DQDK_RCV_RTC, opt_samecore = 0, opt_busy_poll = 0,
+       opt_umem_flags = 0;
     u16 opt_txpktsize = 64;
 
     // program variables
     int ifindex, ret, opt;
-    u32 nbqueues = 0, nbirqs = 0, nprocs = get_nprocs(), umem_size = UMEM_SIZE;
+    u32 nbqueues = 0, nbirqs = 0, nprocs = 0, umem_size = UMEM_SIZE;
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
     interrupts_t *before_interrupts = NULL, *after_interrupts = NULL;
     struct xdp_program* kern_prog = NULL;
@@ -875,6 +945,10 @@ int main(int argc, char** argv)
     timer_t timer;
     socklen_t socklen;
     u8 smac[6];
+    // NUMA
+    int is_numa = 0;
+    int driver_numa_node;
+    unsigned long cpu_mask = 0;
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -886,14 +960,13 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    while ((opt = getopt(argc, argv, "b:cd:hi:l:m:p:q:s:uvwt:A:BI:M:D:HG")) != -1) {
+    while ((opt = getopt(argc, argv, "b:cd:hi:m:p:q:s:uvwt:A:BI:M:D:HGS")) != -1) {
         switch (opt) {
         case 'h':
             dqdk_usage(argv);
             return 0;
         case 'A':
             // mapping to queues is 1-to-1 e.g. first irq to first queue...
-            opt_affinity = 1;
             if (strchr(optarg, ',') == NULL) {
                 nbirqs = 1;
                 opt_irqs[0] = atoi(optarg);
@@ -1032,13 +1105,9 @@ int main(int argc, char** argv)
         case 'u':
             opt_umem_flags |= UMEM_FLAGS_UNALIGNED;
             break;
-        // case 'l':
-        //     opt_umemlen = atoi(optarg);
-        //     if (opt_umemlen < 4096 && is_power_of_2(opt_umemlen)) {
-        //         dlog_errorv("Invalid UMEM length %d. Should be larger than 4096 and multiple of 2", opt_osilayer);
-        //         exit(EXIT_FAILURE);
-        //     }
-        //     break;
+        case 'S':
+            opt_samecore = 1;
+            break;
         default:
             dqdk_usage(argv);
             dlog_error("Invalid Arg\n");
@@ -1049,6 +1118,38 @@ int main(int argc, char** argv)
     if (opt_ifname == NULL || nbqueues == 0) {
         dlog_error("Invalid interface name or number of queues");
         goto cleanup;
+    }
+
+    driver_numa_node = nic_numa_node(opt_ifname);
+    is_numa = numa_available();
+    // TODO: Across-NUMA evaluation
+    if (is_numa < 0) {
+        nprocs = get_nprocs();
+    } else if (driver_numa_node != -1) {
+        numa_exit_on_error = 1;
+        dlog_infov("NUMA is detected! NUMA-node of %s is %d", opt_ifname, driver_numa_node);
+
+        numa_set_bind_policy(1);
+
+        struct bitmask* nodemask = numa_allocate_nodemask();
+        struct bitmask* fromnodemask = numa_allocate_nodemask();
+
+        numa_bitmask_setall(fromnodemask);
+        numa_bitmask_clearbit(fromnodemask, driver_numa_node);
+        numa_bitmask_setbit(nodemask, driver_numa_node);
+
+        numa_bind(nodemask);
+        numa_migrate_pages(getpid(), fromnodemask, nodemask);
+
+        numa_free_nodemask(fromnodemask);
+        numa_free_nodemask(nodemask);
+
+        struct bitmask* cpumask = numa_allocate_cpumask();
+        numa_node_to_cpus(driver_numa_node, cpumask);
+        cpu_mask = *cpumask->maskp;
+        numa_free_cpumask(cpumask);
+        nprocs = popcountl(cpu_mask);
+        dlog_infov("NUMA CPU Mask is %lx of %d CPUs", cpu_mask, nprocs);
     }
 
     opt_umem_flags& UMEM_FLAGS_USE_HGPG ? dlog_info("Huge pages are activated!") : dlog_info("No huge pages are used!");
@@ -1069,21 +1170,19 @@ int main(int argc, char** argv)
         freeifaddrs(addrs);
     }
 
-    if (opt_affinity) {
-        if (opt_pollmode != DQDK_RCV_RTC) {
-            dlog_error("IRQ and thread affinity is only possible in RTC mode using command option: -p rtc ");
-            goto cleanup;
-        }
+    if (nbirqs != nbqueues) {
+        dlog_error("IRQs and number of queues must be equal");
+        goto cleanup;
+    }
 
-        if (nbirqs != nbqueues) {
-            dlog_error("IRQs and number of queues must be equal");
-            goto cleanup;
-        }
+    if (nbirqs > nprocs) {
+        dlog_error("IRQs should be smaller or equal to number of processors");
+        goto cleanup;
+    }
 
-        if (nbirqs > nprocs) {
-            dlog_error("IRQs should be smaller or equal to number of processors");
-            goto cleanup;
-        }
+    if (!opt_samecore && nbqueues * 2 > nprocs && opt_pollmode == DQDK_RCV_RTC) {
+        dlog_errorv("IRQs and Application threads are running on different cores. You should have enough dedicated cores for both of them. The maximum possible cores now is %d", nprocs);
+        goto cleanup;
     }
 
     switch (opt_mode) {
@@ -1184,17 +1283,15 @@ int main(int argc, char** argv)
         dlog_infov("Working %d XSKs on queues: %s", nbqueues, queues);
     }
 
-    if (opt_affinity && opt_pollmode == DQDK_RCV_RTC) {
-        dlog_info_head("IRQ-to-Queue Mappings: ");
-        for (size_t i = 0; i < nbirqs; i++) {
-            if (i != nbirqs - 1) {
-                dlog_info_print("%d-%d, ", opt_irqs[i], opt_queues[i]);
-            } else {
-                dlog_info_print("%d-%d", opt_irqs[i], opt_queues[i]);
-            }
+    dlog_info_head("IRQ-to-Queue Mappings: ");
+    for (size_t i = 0; i < nbirqs; i++) {
+        if (i != nbirqs - 1) {
+            dlog_info_print("%d-%d, ", opt_irqs[i], opt_queues[i]);
+        } else {
+            dlog_info_print("%d-%d", opt_irqs[i], opt_queues[i]);
         }
-        dlog_info_exit();
     }
+    dlog_info_exit();
 
     if ((ret = setrlimit(RLIMIT_MEMLOCK, &rlim))) {
         dlog_error2("setrlimit", ret);
@@ -1218,12 +1315,10 @@ int main(int argc, char** argv)
 
     xsks = (xsk_info*)calloc(nbxsks, sizeof(xsk_info));
     xsk_worker_attrs = (pthread_attr_t*)calloc(nbxsks, sizeof(pthread_attr_t));
-    if (opt_affinity) {
-        cpusets = (cpu_set_t*)calloc(nbxsks, sizeof(cpu_set_t));
-    }
+    cpusets = (cpu_set_t*)calloc(nbxsks, sizeof(cpu_set_t));
 
     if (opt_shared_umem > 1) {
-        shared_umem = nbqueues != 1 ? umem_info_create(nbxsks, umem_size, opt_umem_flags) : umem_info_create(1, umem_size, opt_umem_flags);
+        shared_umem = nbqueues != 1 ? umem_info_create(nbxsks, umem_size, opt_umem_flags, driver_numa_node) : umem_info_create(1, umem_size, opt_umem_flags, driver_numa_node);
         umem_configure(shared_umem);
     }
 
@@ -1257,7 +1352,7 @@ int main(int argc, char** argv)
         if (opt_shared_umem > 1) {
             xsks[i].umem_info = shared_umem;
         } else {
-            xsks[i].umem_info = umem_info_create(1, umem_size, opt_umem_flags);
+            xsks[i].umem_info = umem_info_create(1, umem_size, opt_umem_flags, driver_numa_node);
             umem_configure(xsks[i].umem_info);
         }
 
@@ -1322,7 +1417,7 @@ int main(int argc, char** argv)
         }
 
         if (IS_THREADED(opt_pollmode, nbqueues)) {
-            pthread_attr_t* attrs = opt_affinity ? &xsk_worker_attrs[i] : NULL;
+            pthread_attr_t* attrs = &xsk_worker_attrs[i];
             struct benchmark_ctx* ctx = &ctxs[i];
             ctx->xsks = &xsks[i];
             ctx->pollmode = opt_pollmode;
@@ -1331,27 +1426,11 @@ int main(int argc, char** argv)
             memcpy(ctx->smac, smac, 6);
             memcpy(ctx->dmac, opt_dmac, 6);
 
-            if (opt_affinity) {
-                pthread_attr_init(attrs);
-                // Set process and interrupt affinity to same CPU
-                int app_aff, irq_aff;
-                // FIXME: this is incorrect logic. hyperthreads are necessarily contiguous.
-                if (opt_hyperthreading) {
-                    irq_aff = 2 * i;
-                    app_aff = (2 * i) + 1;
-                } else {
-                    irq_aff = app_aff = i % nprocs;
-                }
-
-                nic_set_irq_affinity(opt_irqs[i], irq_aff);
-
-                CPU_ZERO(&cpusets[i]);
-                CPU_SET(app_aff, &cpusets[i]);
-                ret = pthread_attr_setaffinity_np(attrs, sizeof(cpu_set_t), &cpusets[i]);
-                if (ret) {
-                    dlog_error2("pthread_attr_setaffinity_np", ret);
-                }
-            }
+            pthread_attr_init(attrs);
+            // Set process and interrupt affinity to same CPU
+            ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[i], &cpu_mask, &cpusets[i], attrs);
+            if (ret)
+                goto cleanup;
 
             pthread_create(&xsk_workers[i], attrs, opt_handler, (void*)ctx);
         }
@@ -1366,21 +1445,10 @@ int main(int argc, char** argv)
         };
         memcpy(&ctx.smac, smac, 6);
         memcpy(&ctx.dmac, opt_dmac, 6);
+        ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[0], &cpu_mask, &cpusets[0], NULL);
 
-        if (opt_affinity) {
-            int app_aff, irq_aff;
-            // FIXME: this is incorrect logic. hyperthreads are necessarily contiguous.
-            if (opt_hyperthreading) {
-                irq_aff = 0;
-                app_aff = 1;
-            } else {
-                irq_aff = app_aff = 0;
-            }
-            nic_set_irq_affinity(opt_irqs[0], irq_aff);
-            CPU_ZERO(&cpusets[0]);
-            CPU_SET(app_aff, &cpusets[0]);
-            sched_setaffinity(0, sizeof(cpu_set_t), &cpusets[0]);
-        }
+        if (ret)
+            goto cleanup;
 
         opt_handler(&ctx);
     }
@@ -1388,9 +1456,8 @@ int main(int argc, char** argv)
     struct xsk_stat avg_stats;
     memset(&avg_stats, 0, sizeof(avg_stats));
     for (u32 i = 0; i < nbxsks; i++) {
-        if (IS_THREADED(opt_pollmode, nbqueues)) {
+        if (IS_THREADED(opt_pollmode, nbqueues))
             pthread_join(xsk_workers[i], NULL);
-        }
 
         xsk_stats_dump(&xsks[i]);
         avg_stats.runtime = MAX(avg_stats.runtime, xsks[i].stats.runtime);
@@ -1416,9 +1483,8 @@ int main(int argc, char** argv)
         avg_stats.xstats.tx_ring_empty_descs += xsks[i].stats.xstats.tx_ring_empty_descs;
     }
 
-    if (opt_irqstring != NULL) {
+    if (opt_irqstring != NULL)
         after_interrupts = nic_get_interrupts(opt_irqstring, nprocs);
-    }
 
     if (nbxsks != 1) {
         printf("Average Stats:\n");
@@ -1504,6 +1570,6 @@ cleanup:
     }
 
     if (opt_umem_flags & UMEM_FLAGS_USE_HGPG) {
-        set_hugepages(0);
+        set_hugepages(driver_numa_node, 0);
     }
 }

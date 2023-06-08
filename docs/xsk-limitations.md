@@ -7,3 +7,4 @@
 - Multithreading on one socket is not possible (fill and completion rings are one-producer/one-consumer rings)
 - One umem per (nic, queueid) tuple (required for zero-copy; not implemented for copy)
 - No flags should be specified to the XSK with `XDP_SHARED_UMEM` (create first socket as usual - no `XDP_SHARED_UMEM` - and 2nd socket and others should ONLY have `XDP_SHARED_UMEM`)
+- does not support HW offloads YET, but there are some initiatives to make it happend through passing of HW hints to XDP application e.g. xdp-hints

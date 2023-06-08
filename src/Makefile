@@ -5,7 +5,7 @@ EXTRA_USER_DEPS := tcpip/* dlog.h dqdk.h
 TEST_FILE       := 
 
 LIB_DIR          = $(abspath ../xdp-tools/lib)
-USER_LIBS       := -lpthread
+USER_LIBS       := -lpthread -lnuma
 MAN_PAGE        :=
 
 ## add USER_DEFINES=-Dflag to make to build daq with some flag where flag can be:

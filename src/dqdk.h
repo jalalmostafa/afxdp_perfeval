@@ -9,6 +9,9 @@
 #include <fcntl.h>
 #include <math.h>
 #include <ctype.h>
+#include <numa.h>
+#include <errno.h>
+#include <unistd.h>
 
 #include "dlog.h"
 
@@ -20,58 +23,116 @@ typedef __u64 u64;
 #define always_inline inline __attribute__((always_inline))
 
 #define HUGEPAGE_2MB_SIZE 2097152
-// get device NUMA node /sys/class/net/ens106np0/device/numa_node
-// get NUMA node huge pages /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
 #define HUGETLB_PATH "/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages"
 #define HUGETLB_CALC(size) ((u32)ceil(size / HUGEPAGE_2MB_SIZE))
-#define HUGETLB_DIGITS 10
+#define INT_BUFFER 100
+#define STRING_BUFFER 1024
 
-always_inline int get_hugepages()
+char* sys_read_string(const char* path)
 {
-    char buffer[HUGETLB_DIGITS] = { 0 };
+    char* buffer = calloc(1, STRING_BUFFER);
 
-    int fd = open(HUGETLB_PATH, O_RDONLY);
+    int fd = open(path, O_RDONLY);
     if (fd < 0) {
         dlog_error2("open", fd);
-        return -1;
     }
 
-    int ret = read(fd, &buffer, HUGETLB_DIGITS);
+    int ret = read(fd, buffer, STRING_BUFFER);
     if (ret < 0) {
         dlog_error2("read", ret);
-        return -1;
     }
 
-    int nb_hugepages = atoi(buffer);
     close(fd);
-    return nb_hugepages;
+    return buffer;
 }
 
-void set_hugepages(int nb_hugepages)
+int sys_read_uint(const char* path)
 {
-    char buffer[HUGETLB_DIGITS] = { 0 };
+    char buffer[INT_BUFFER] = { 0 };
+    int ret = -1;
 
-    int fd = open(HUGETLB_PATH, O_WRONLY);
+    int fd = open(path, O_RDONLY);
     if (fd < 0) {
+        puts(path);
         dlog_error2("open", fd);
-        return;
+        return ret;
     }
 
-    sprintf(buffer, "%d\n", nb_hugepages);
+    ret = read(fd, &buffer, INT_BUFFER);
+    if (ret < 0) {
+        dlog_error2("read", ret);
+        goto exit;
+    }
 
-    int ret = write(fd, &buffer, 10);
+    ret = atoi(buffer);
+
+exit:
+    close(fd);
+    return ret;
+}
+
+int sys_write_int(const char* path, int value)
+{
+    char buffer[INT_BUFFER] = { 0 };
+    int ret = -1;
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) {
+        puts(path);
+        dlog_error2("open", fd);
+        return ret;
+    }
+
+    sprintf(buffer, "%d\n", value);
+    ret = write(fd, &buffer, strlen(buffer));
     if (ret < 0) {
         dlog_error2("write", ret);
-        return;
+        goto exit;
     }
+
+exit:
     close(fd);
+    return ret;
 }
 
-u8* huge_malloc(u64 size)
+int nic_numa_node(const char* ifname)
+{
+    char ifnuma[PATH_MAX] = { 0 };
+    snprintf(ifnuma, PATH_MAX, "/sys/class/net/%s/device/numa_node", ifname);
+    return sys_read_uint(ifnuma);
+}
+
+// get NUMA node huge pages
+char* get_numa_hugepages_path(int numanode)
+{
+    char* path = calloc(1, PATH_MAX);
+    sprintf(path, "/sys/devices/system/node/node%d/hugepages/hugepages-2048kB/nr_hugepages", numanode);
+    return path;
+}
+
+int reserve_hugepages(const char* path, int nb_hugepages)
+{
+    return sys_write_int(path, nb_hugepages);
+}
+
+int set_hugepages(int device_numanode, int howmany)
+{
+    char* path;
+    int ret;
+
+    if (device_numanode == -1) {
+        return reserve_hugepages(HUGETLB_PATH, howmany);
+    }
+
+    path = get_numa_hugepages_path(device_numanode);
+    ret = reserve_hugepages(path, howmany);
+    free(path);
+    return ret;
+}
+
+u8* huge_malloc(int devicenode, u64 size)
 {
     int needed_hgpg = HUGETLB_CALC(size);
-    int current_hgpg = get_hugepages();
-    set_hugepages(current_hgpg + needed_hgpg);
+    set_hugepages(devicenode, needed_hgpg);
 
     void* map = mmap(NULL, size, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
@@ -93,13 +154,9 @@ u64 clock_nsecs()
 
 void nic_set_irq_affinity(int irq, int cpu)
 {
-    char mask[10] = { 0 };
     char irq_file[PATH_MAX] = { 0 };
-    snprintf(irq_file, 30, "/proc/irq/%d/smp_affinity", irq);
-    snprintf(mask, 10, "%d", 1 << cpu);
-    int fd = open(irq_file, O_RDWR);
-    write(fd, mask, strlen(mask));
-    close(fd);
+    snprintf(irq_file, PATH_MAX, "/proc/irq/%d/smp_affinity_list", irq);
+    sys_write_int(irq_file, cpu);
 }
 
 typedef struct {
@@ -163,5 +220,32 @@ interrupts_t* nic_get_interrupts(char* irqstr, u32 nprocs)
 #define DQDK_DURATION 3
 
 #define is_power_of_2(x) ((x != 0) && ((x & (x - 1)) == 0))
+#define popcountl(x) __builtin_popcountl(x)
+
+int is_smt()
+{
+    return sys_read_uint("/sys/devices/system/cpu/smt/active");
+}
+
+int cpu_smt_sibling(int cpu)
+{
+    char path[PATH_MAX];
+    snprintf(path, PATH_MAX, "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu);
+    char* siblings = sys_read_string(path);
+    char* sibling;
+    int isibling = -1;
+
+    while ((sibling = strtok(siblings, ",")) != NULL) {
+        if (atoi(sibling) != cpu) {
+            isibling = atoi(sibling);
+            goto exit;
+        }
+        siblings = NULL;
+    }
+
+exit:
+    free(siblings);
+    return isibling;
+}
 
 #endif
