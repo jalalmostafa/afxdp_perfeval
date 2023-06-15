@@ -74,3 +74,22 @@ else
     # echo "Run 'set_irq_affinity_cpulist.sh <numa-node-cpu-ranges> $NIC' with respective CPU list of NUMA Node $mlx5_numa_node"
     # echo "Run 'lscpu | grep -i numa' to get CPU lists"
 fi
+
+echo "Optimizing busy poll parameters..."
+echo 2 | sudo tee /sys/class/net/$NIC/napi_defer_hard_irqs
+echo 200000 | sudo tee /sys/class/net/$NIC/gro_flush_timeout
+
+echo "Optimizing busy poll parameters..."
+echo 2 | sudo tee /sys/class/net/$NIC/napi_defer_hard_irqs
+echo 200000 | sudo tee /sys/class/net/$NIC/gro_flush_timeout
+
+ht=`cat /sys/devices/system/cpu/smt/active`
+if [ "$ht" = "1" ]; then
+    echo "Hyper-threading is enabled!"
+    read -p "Disable Hyperthreading? [y/n]..." answer
+    if [ "$answer" = "y" ]; then
+        echo off > /sys/devices/system/cpu/smt/control
+    fi
+else
+    echo "Hyper-threading is disabled!"
+fi
