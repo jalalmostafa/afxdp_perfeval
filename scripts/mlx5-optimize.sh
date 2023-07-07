@@ -9,6 +9,8 @@ fi
 
 NIC=$1
 queues=1
+pci=`ethtool -i $NIC | grep 'bus-info:' | sed 's/bus-info: //'`
+
 if [[ "$2" != "" ]]; then
     queues=$2
 fi
@@ -21,7 +23,7 @@ ip link set dev $NIC mtu 3498
 
 echo "ethtool-based Optimizations"
 ethtool -A $NIC tx off rx off
-ethtool -G $NIC tx 4096 rx 4096
+#ethtool -G $NIC tx 4096 rx 4096
 ethtool -L $NIC combined $queues
 ethtool -C $NIC adaptive-rx off adaptive-tx off rx-usecs 0 tx-usecs 0
 ethtool -K $NIC gro off rx-fcs off sg off tx-ipxip4-segmentation off rx-checksumming off tx-checksumming off \
@@ -37,14 +39,14 @@ tx-gso-partial off tx-tcp6-segmentation off rx-checksumming off tx-checksumming 
 #                            rx_striding_rq off rx_no_csum_complete off xdp_tx_mpwqe off \
 #                            skb_tx_mpwqe off tx_port_ts off
 
-# read -p "Set PCI MaxReadReq to 1024? [y/n]..." answer
-# if [ "$answer" = "y" ]; then
-#     # https://enterprise-support.nvidia.com/s/article/understanding-pcie-configuration-for-maximum-performance
-#     r68w=`setpci -s $pci 68.w`
-#     new_r68w="3${r68w:1}"
-#     echo "Old 68.w=$r68w. New 68.w=$new_r68w"
-#     setpci -s $pci 68.w=$new_r68w
-# fi
+read -p "Set PCI MaxReadReq to 1024? [y/n]..." answer
+if [ "$answer" = "y" ]; then
+    # https://enterprise-support.nvidia.com/s/article/understanding-pcie-configuration-for-maximum-performance
+    r68w=`setpci -s $pci 68.w`
+    new_r68w="3${r68w:1}"
+    echo "$pci: Old 68.w=$r68w. New 68.w=$new_r68w"
+    setpci -s $pci 68.w=$new_r68w
+fi
 
 echo "Optimizing Virtual Memory Usage..."
 sysctl -w vm.zone_reclaim_mode=0
@@ -86,9 +88,9 @@ else
     # echo "Run 'lscpu | grep -i numa' to get CPU lists"
 fi
 
-echo "Optimizing busy poll parameters..."
-echo 2 > /sys/class/net/$NIC/napi_defer_hard_irqs
-echo 200000 > /sys/class/net/$NIC/gro_flush_timeout
+# echo "Optimizing busy poll parameters..."
+# echo 2 > /sys/class/net/$NIC/napi_defer_hard_irqs
+# echo 200000 > /sys/class/net/$NIC/gro_flush_timeout
 
 ht=`cat /sys/devices/system/cpu/smt/active`
 if [ "$ht" = "1" ]; then

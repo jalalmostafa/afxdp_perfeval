@@ -94,7 +94,7 @@ typedef struct {
     struct xsk_stat stats;
 } xsk_info;
 
-u32 break_flag = 0;
+volatile u32 break_flag = 0;
 
 static void* umem_buffer_create(u32 size, u8 flags, int driver_numa)
 {
@@ -432,8 +432,8 @@ always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem, u32* umem_cursor)
 
 always_inline int complete_tx_l2fwd(xsk_info* xsk, struct xsk_ring_prod* fq, struct xsk_ring_cons* cq)
 {
-    u32 idx_cq = 0, idx_fq = 0, rcvd;
-    int ret;
+    u32 idx_cq = 0, idx_fq = 0;
+    int ret, rcvd;
     if (!xsk->outstanding_tx)
         return 0;
 
@@ -445,8 +445,8 @@ always_inline int complete_tx_l2fwd(xsk_info* xsk, struct xsk_ring_prod* fq, str
     /* re-add completed Tx buffers */
     size_t ndescs = (xsk->outstanding_tx > xsk->batch_size) ? xsk->batch_size : xsk->outstanding_tx;
     rcvd = xsk_ring_cons__peek(cq, ndescs, &idx_cq);
+    ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
     if (rcvd > 0) {
-        ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
         while (ret != (int)rcvd) {
             if (ret < 0) {
                 dlog_error2("xsk_ring_prod__reserve", ret);
@@ -461,7 +461,7 @@ always_inline int complete_tx_l2fwd(xsk_info* xsk, struct xsk_ring_prod* fq, str
             ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
         }
 
-        for (u32 i = 0; i < rcvd; i++)
+        for (int i = 0; i < rcvd; i++)
             *xsk_ring_prod__fill_addr(fq, idx_fq++) = *xsk_ring_cons__comp_addr(cq, idx_cq++);
 
         xsk_ring_prod__submit(fq, rcvd);
@@ -474,9 +474,8 @@ always_inline int complete_tx_l2fwd(xsk_info* xsk, struct xsk_ring_prod* fq, str
 
 always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
 {
-    u32 rcvd, i;
     u32 idx_rx = 0, idx_tx = 0;
-    int ret;
+    int i, rcvd, ret;
     struct xsk_ring_prod* fq = umem->nbfqs != 1 ? xsk->fill_ring : &umem->fq0;
     struct xsk_ring_cons* cq = umem->nbfqs != 1 ? xsk->comp_ring : &umem->cq0;
 
@@ -495,7 +494,7 @@ always_inline int xdp_l2fwd(xsk_info* xsk, umem_info* umem)
     xsk->stats.rcvd_frames += rcvd;
 
     ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
-    while (ret != (int)rcvd) {
+    while (ret != rcvd) {
         if (ret < 0) {
             dlog_error2("xsk_ring_prod__reserve", ret);
             return ECOMM;
@@ -836,10 +835,12 @@ void dqdk_usage(char** argv)
     printf("    -S                           Run IRQ and App on same core\n");
 }
 
+#define dqdk_update_mask(mask, howmany) (*mask = *mask & (0xffffffffffffffff << (howmany)));
+
 int dqdk_get_next_core(unsigned long* mask)
 {
     int ret = ffsll(*mask);
-    *mask = *mask & (0xffffffffffffffff << ret);
+    dqdk_update_mask(mask, ret);
     return ret - 1;
 }
 
@@ -860,7 +861,13 @@ u32 dqdk_calc_affinity(int irq, int ht, int samecore, unsigned long* cpumask)
             dlog_error("Hyper-Threading is enabled but not chosen in the configuration");
             return (u32)-1;
         }
-        app_aff = samecore ? irq_aff : irq_aff + 1;
+
+        if (samecore) {
+            app_aff = irq_aff;
+        } else {
+            app_aff = irq_aff + 1;
+            dqdk_update_mask(cpumask, app_aff + 1);
+        }
     }
     dlog_infov("IRQ(%d) Affinity=%d and Thread Afinity=%d", irq, irq_aff, app_aff);
     affinity = ((irq_aff << 16) & 0xffff0000) | (app_aff & 0x0000ffff);
