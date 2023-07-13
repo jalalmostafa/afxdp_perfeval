@@ -1310,6 +1310,7 @@ int main(int argc, char** argv)
     kern_prog = xdp_program__open_file(xdp_filename, NULL, NULL);
     ret = xdp_program__attach(kern_prog, ifindex, opt_mode, 0);
     if (ret) {
+        kern_prog = NULL;
         dlog_error2("xdp_program__attach", ret);
         goto cleanup;
     }
@@ -1499,7 +1500,20 @@ int main(int argc, char** argv)
         printf("Average Stats:\n");
         stats_dump(&avg_stats);
     }
+
 cleanup:
+    /**
+     * in case some thread were running but others failed
+     * (e.g. when launching with 4 queues but only 2 are available)
+     * break the running ones so we do not cause a segfault by
+     * freeing data for the running ones
+     */
+    if (xsk_workers != NULL && IS_THREADED(opt_pollmode, nbqueues)) {
+        break_flag = 1;
+        for (u32 i = 0; i < nbxsks; i++)
+            pthread_join(xsk_workers[i], NULL);
+    }
+
     if (after_interrupts != NULL && before_interrupts != NULL) {
         u32 sum = 0;
         dlog_info_head("IRQ Interrupts: ");
@@ -1527,8 +1541,10 @@ cleanup:
     }
 
     timer_delete(timer);
-    xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
-    xdp_program__close(kern_prog);
+    if (kern_prog != NULL) {
+        xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
+        xdp_program__close(kern_prog);
+    }
 
     if (xsks != NULL) {
         for (size_t i = 0; i < nbxsks; i++) {
