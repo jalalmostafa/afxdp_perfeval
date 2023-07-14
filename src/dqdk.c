@@ -844,7 +844,7 @@ int dqdk_get_next_core(unsigned long* mask)
     return ret - 1;
 }
 
-u32 dqdk_calc_affinity(int irq, int ht, int samecore, unsigned long* cpumask)
+u32 dqdk_calc_affinity(int irq, int ht, int samecore, int totalirqs, unsigned long* cpumask)
 {
     u32 affinity = 0;
     u16 app_aff = 0, irq_aff = dqdk_get_next_core(cpumask);
@@ -865,8 +865,8 @@ u32 dqdk_calc_affinity(int irq, int ht, int samecore, unsigned long* cpumask)
         if (samecore) {
             app_aff = irq_aff;
         } else {
-            app_aff = irq_aff + 1;
-            dqdk_update_mask(cpumask, app_aff + 1);
+            app_aff = irq_aff + totalirqs;
+            // dqdk_update_mask(cpumask, app_aff + 1);
         }
     }
     dlog_infov("IRQ(%d) Affinity=%d and Thread Afinity=%d", irq, irq_aff, app_aff);
@@ -877,10 +877,10 @@ u32 dqdk_calc_affinity(int irq, int ht, int samecore, unsigned long* cpumask)
 #define DQDK_APP_AFFINITY(x) ((u16)(x & 0x0000ffff))
 #define DQDK_IRQ_AFFINITY(x) ((u16)(x >> 16) & 0x0000ffff)
 
-int dqdk_set_affinity(int ht, int samecore, int irq, unsigned long* cpumask, cpu_set_t* cpuset, pthread_attr_t* attrs)
+int dqdk_set_affinity(int ht, int samecore, int irq, int totalirqs, unsigned long* cpumask, cpu_set_t* cpuset, pthread_attr_t* attrs)
 {
-    u32 affinity = dqdk_calc_affinity(irq, ht, samecore, cpumask);
-    int ret;
+    u32 affinity = dqdk_calc_affinity(irq, ht, samecore, totalirqs, cpumask);
+    int ret = 0;
 
     if (affinity == (u32)-1) {
         return -1;
@@ -949,7 +949,7 @@ int main(int argc, char** argv)
     int is_numa = 0;
     int driver_numa_node;
     unsigned long cpu_mask = 0;
-    u8 selnumanode = 0;
+    u8 selnumanode = 0, finished = 0;
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -1309,7 +1309,7 @@ int main(int argc, char** argv)
 
     kern_prog = xdp_program__open_file(xdp_filename, NULL, NULL);
     ret = xdp_program__attach(kern_prog, ifindex, opt_mode, 0);
-    if (ret) {
+    if (ret < 0) {
         kern_prog = NULL;
         dlog_error2("xdp_program__attach", ret);
         goto cleanup;
@@ -1329,7 +1329,10 @@ int main(int argc, char** argv)
 
     if (opt_shared_umem > 1) {
         shared_umem = nbqueues != 1 ? umem_info_create(nbxsks, umem_size, opt_umem_flags, driver_numa_node) : umem_info_create(1, umem_size, opt_umem_flags, driver_numa_node);
-        umem_configure(shared_umem);
+        ret = umem_configure(shared_umem);
+        if (ret) {
+            goto cleanup;
+        }
     }
 
     struct sigevent sigv;
@@ -1363,7 +1366,10 @@ int main(int argc, char** argv)
             xsks[i].umem_info = shared_umem;
         } else {
             xsks[i].umem_info = umem_info_create(1, umem_size, opt_umem_flags, driver_numa_node);
-            umem_configure(xsks[i].umem_info);
+            ret = umem_configure(xsks[i].umem_info);
+            if (ret) {
+                goto cleanup;
+            }
         }
 
         ret = xsk_configure(&xsks[i], opt_ifname);
@@ -1438,7 +1444,7 @@ int main(int argc, char** argv)
 
             pthread_attr_init(attrs);
             // Set process and interrupt affinity to same CPU
-            ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[i], &cpu_mask, &cpusets[i], attrs);
+            ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[i], nbirqs, &cpu_mask, &cpusets[i], attrs);
             if (ret)
                 goto cleanup;
 
@@ -1455,7 +1461,8 @@ int main(int argc, char** argv)
         };
         memcpy(&ctx.smac, smac, 6);
         memcpy(&ctx.dmac, opt_dmac, 6);
-        ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[0], &cpu_mask, &cpusets[0], NULL);
+        (void)opt_hyperthreading;
+        ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[0], nbirqs, &cpu_mask, &cpusets[0], NULL);
 
         if (ret)
             goto cleanup;
@@ -1493,6 +1500,7 @@ int main(int argc, char** argv)
         avg_stats.xstats.tx_ring_empty_descs += xsks[i].stats.xstats.tx_ring_empty_descs;
     }
 
+    finished = 1;
     if (opt_irqstring != NULL)
         after_interrupts = nic_get_interrupts(opt_irqstring, nprocs);
 
@@ -1508,7 +1516,7 @@ cleanup:
      * break the running ones so we do not cause a segfault by
      * freeing data for the running ones
      */
-    if (xsk_workers != NULL && IS_THREADED(opt_pollmode, nbqueues)) {
+    if (!finished && xsk_workers != NULL && IS_THREADED(opt_pollmode, nbqueues)) {
         break_flag = 1;
         for (u32 i = 0; i < nbxsks; i++)
             pthread_join(xsk_workers[i], NULL);

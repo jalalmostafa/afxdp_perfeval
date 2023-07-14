@@ -129,9 +129,24 @@ int set_hugepages(int device_numanode, int howmany)
     return ret;
 }
 
+int get_hugepages(int device_numanode)
+{
+    int ret;
+    char* path;
+
+    if (device_numanode == -1) {
+        return sys_read_uint(HUGETLB_PATH);
+    }
+
+    path = get_numa_hugepages_path(device_numanode);
+    ret = sys_read_uint(path);
+    free(path);
+    return ret;
+}
+
 u8* huge_malloc(int devicenode, u64 size)
 {
-    int needed_hgpg = HUGETLB_CALC(size);
+    int needed_hgpg = get_hugepages(devicenode) + HUGETLB_CALC(size);
     set_hugepages(devicenode, needed_hgpg);
 
     void* map = mmap(NULL, size, PROT_READ | PROT_WRITE,

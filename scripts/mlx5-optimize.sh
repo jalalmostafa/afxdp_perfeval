@@ -33,13 +33,12 @@ rx-udp-gro-forwarding off tx off tx-nocache-copy off tx-udp_tnl-segmentation off
 lro off rx-udp_tunnel-port-offload off tx-checksum-ip-generic off \
 tx-scatter-gather off tx-vlan-stag-hw-insert off ntuple on rx-vlan-filter off \
 tx-gre-csum-segmentation off tx-tcp-mangleid-segmentation off txvlan off rx off \
-rxhash off tx-gre-segmentation off tx-tcp-segmentation off rx-all off rxvlan off \
+rxhash on tx-gre-segmentation off tx-tcp-segmentation off rx-all off rxvlan off \
 tx-gso-partial off tx-tcp6-segmentation off rx-checksumming off tx-checksumming off
-#ethtool --set-priv-flags $1 rx_cqe_moder off tx_cqe_moder off rx_cqe_compress off \
-#                            rx_striding_rq off rx_no_csum_complete off xdp_tx_mpwqe off \
-#                            skb_tx_mpwqe off tx_port_ts off
+ethtool --set-priv-flags $NIC rx_cqe_compress on
 
-read -p "Set PCI MaxReadReq to 1024? [y/n]..." answer
+read -p "Set PCI MaxReadReq to 1024? [y/n]..." -n 1 answer
+echo ""
 if [ "$answer" = "y" ]; then
     # https://enterprise-support.nvidia.com/s/article/understanding-pcie-configuration-for-maximum-performance
     r68w=`setpci -s $pci 68.w`

@@ -4,7 +4,8 @@
         "*.props": "xml",
         "*.targets": "xml",
         "*.h": "c",
-        "*.c": "c"
+        "*.c": "c",
+        "random": "c"
     },
     "C_Cpp.errorSquiggles": "disabled",
     "[python]": {

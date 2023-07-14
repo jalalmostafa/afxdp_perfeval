@@ -23,7 +23,12 @@ tx_packets_phy=$(echo $values_now | awk '{print $7}')
 
 shift
 shift
+PERF_EV="context-switches,cpu-migrations,cycles,mem-loads,mem-stores,ref-cycles,instructions,LLC-loads,LLC-load-misses,LLC-stores,LLC-store-misses,dTLB-load-misses,dTLB-loads,dTLB-store-misses,dTLB-stores,iTLB-load-misses,branch-instructions,branch-misses,bus-cycles"
+
+# /home/jalal/linux-6.1.34/tools/perf/perf stat -e $PERF_EV ./dqdk -i $NIC -d $DURATION $@
 ./dqdk -i $NIC -d $DURATION $@
+
+# /usr/bin/pidstat -h -H -G 'dqdk|softirq' -t 1
 
 values_now=$(ethtool -S $NIC | egrep "tx0_xsk_xmit|tx0_xsk_mpwqe|tx0_xsk_inlnw|tx0_xsk_cqes|rx0_xsk_buff_alloc_err|tx_bytes_phy|tx_packets_phy" | sort | awk '{print $2}' ORS=' ')
 rx0_xsk_buff_alloc_err_now=$(echo $values_now | awk '{print $1}')
