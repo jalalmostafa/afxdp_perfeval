@@ -844,7 +844,7 @@ int dqdk_get_next_core(unsigned long* mask)
     return ret - 1;
 }
 
-u32 dqdk_calc_affinity(int irq, int ht, int samecore, int totalirqs, unsigned long* cpumask)
+u32 dqdk_calc_affinity(int irq, int ht, int samecore, unsigned long* cpumask)
 {
     u32 affinity = 0;
     u16 app_aff = 0, irq_aff = dqdk_get_next_core(cpumask);
@@ -865,8 +865,8 @@ u32 dqdk_calc_affinity(int irq, int ht, int samecore, int totalirqs, unsigned lo
         if (samecore) {
             app_aff = irq_aff;
         } else {
-            app_aff = irq_aff + totalirqs;
-            // dqdk_update_mask(cpumask, app_aff + 1);
+            app_aff = irq_aff + 1;
+            dqdk_update_mask(cpumask, app_aff + 1);
         }
     }
     dlog_infov("IRQ(%d) Affinity=%d and Thread Afinity=%d", irq, irq_aff, app_aff);
@@ -877,9 +877,9 @@ u32 dqdk_calc_affinity(int irq, int ht, int samecore, int totalirqs, unsigned lo
 #define DQDK_APP_AFFINITY(x) ((u16)(x & 0x0000ffff))
 #define DQDK_IRQ_AFFINITY(x) ((u16)(x >> 16) & 0x0000ffff)
 
-int dqdk_set_affinity(int ht, int samecore, int irq, int totalirqs, unsigned long* cpumask, cpu_set_t* cpuset, pthread_attr_t* attrs)
+int dqdk_set_affinity(int ht, int samecore, int irq, unsigned long* cpumask, cpu_set_t* cpuset, pthread_attr_t* attrs)
 {
-    u32 affinity = dqdk_calc_affinity(irq, ht, samecore, totalirqs, cpumask);
+    u32 affinity = dqdk_calc_affinity(irq, ht, samecore, cpumask);
     int ret = 0;
 
     if (affinity == (u32)-1) {
@@ -925,7 +925,8 @@ int main(int argc, char** argv)
     };
     u8 opt_needs_wakeup = 0, opt_verbose = 0, opt_zcopy = 1, opt_hyperthreading = 0,
        opt_pollmode = DQDK_RCV_RTC, opt_samecore = 0, opt_busy_poll = 0,
-       opt_umem_flags = 0, opt_selnumanode = 0;
+       opt_umem_flags = 0;
+    int opt_selnumanode = 0;
     u16 opt_txpktsize = 64;
 
     // program variables
@@ -1139,25 +1140,33 @@ int main(int argc, char** argv)
 
         dlog_infov("Selected NUMA node is %d", driver_numa_node);
 
-        numa_set_bind_policy(1);
-        struct bitmask* nodemask = numa_allocate_nodemask();
-        struct bitmask* fromnodemask = numa_allocate_nodemask();
+        if (opt_selnumanode > -1) {
+            numa_set_bind_policy(1);
+            struct bitmask* nodemask = numa_allocate_nodemask();
+            struct bitmask* fromnodemask = numa_allocate_nodemask();
 
-        numa_bitmask_setall(fromnodemask);
-        numa_bitmask_clearbit(fromnodemask, driver_numa_node);
-        numa_bitmask_setbit(nodemask, driver_numa_node);
+            numa_bitmask_clearall(nodemask);
+            numa_bitmask_setbit(nodemask, driver_numa_node);
+            numa_bind(nodemask);
 
-        numa_bind(nodemask);
-        numa_migrate_pages(getpid(), fromnodemask, nodemask);
+            numa_bitmask_setall(fromnodemask);
+            numa_bitmask_clearbit(fromnodemask, driver_numa_node);
+            numa_migrate_pages(getpid(), fromnodemask, nodemask);
 
-        numa_free_nodemask(fromnodemask);
-        numa_free_nodemask(nodemask);
+            numa_free_nodemask(fromnodemask);
+            numa_free_nodemask(nodemask);
 
-        struct bitmask* cpumask = numa_allocate_cpumask();
-        numa_node_to_cpus(driver_numa_node, cpumask);
-        cpu_mask = *cpumask->maskp;
-        numa_free_cpumask(cpumask);
-        nprocs = popcountl(cpu_mask);
+            struct bitmask* cpumask = numa_allocate_cpumask();
+            numa_node_to_cpus(driver_numa_node, cpumask);
+            cpu_mask = *cpumask->maskp;
+            numa_free_cpumask(cpumask);
+            nprocs = popcountl(cpu_mask);
+        } else {
+            // FIXME: we should allocate numa-aware memory
+            numa_set_bind_policy(0);
+            cpu_mask = (unsigned long)-1;
+            nprocs = get_nprocs();
+        }
         dlog_infov("NUMA CPU Mask is %#010lX of %d CPUs", cpu_mask, nprocs);
     }
 
@@ -1444,7 +1453,7 @@ int main(int argc, char** argv)
 
             pthread_attr_init(attrs);
             // Set process and interrupt affinity to same CPU
-            ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[i], nbirqs, &cpu_mask, &cpusets[i], attrs);
+            ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[i], &cpu_mask, &cpusets[i], attrs);
             if (ret)
                 goto cleanup;
 
@@ -1462,7 +1471,7 @@ int main(int argc, char** argv)
         memcpy(&ctx.smac, smac, 6);
         memcpy(&ctx.dmac, opt_dmac, 6);
         (void)opt_hyperthreading;
-        ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[0], nbirqs, &cpu_mask, &cpusets[0], NULL);
+        ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[0], &cpu_mask, &cpusets[0], NULL);
 
         if (ret)
             goto cleanup;

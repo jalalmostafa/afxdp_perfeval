@@ -30,6 +30,7 @@ def file_parser(filename, socket=None):
         avg_readb += readb
         avg_writeb += writeb
 
+    file.close()
     return (avg_readb / samples), (avg_writeb / samples)
 
 
