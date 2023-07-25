@@ -46,6 +46,4 @@ if __name__ == '__main__':
     print(len(files), 'files detected for', pattern)
     for file in sorted(files, key=alphanumeric_sort):
         readb, writeb = file_parser(file, socket=socket)
-        print(file, 'Avg. Read (MB/s):', round(readb / 1e6, 2),
-              'Avg. Write (MB/s):', round(writeb / 1e6, 2),
-              'Avg. Total:', round((readb + writeb) / 1e6, 2),)
+        print(file, ',', round(readb / 1e6, 2), ',', round(writeb / 1e6, 2),)
