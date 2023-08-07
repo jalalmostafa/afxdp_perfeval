@@ -19,6 +19,10 @@ make
 ```
 
 ## Experimentation
+
+### t-rex
+T-Rex is used to measure latency. Docs how to setup, build, and run t-rex are available in [docs/trex](docs/trex.md)
+
 ### pktgen-dpdk
 Pktgen-dpdk is used to generate packets of different packet sizes. A guide how to setup and run with configuration is available in [docs/pktgen-dpdk](docs/pktgen-dpdk.md).
 
@@ -26,3 +30,31 @@ Pktgen-dpdk is used to generate packets of different packet sizes. A guide how t
 We provide scripts to run our benchmarks using virtual interfaces on the same machine (just for testing purposes). Details in [docs/veth](docs/veth.md)
 
 ## Running
+
+```bash
+Usage: ./dqdk -i <interface_name> -q <hardware_queue_id>
+Arguments:
+    -d <duration>                Set the run duration in seconds. Default: 3 secs
+    -i <interface>               Set NIC to work on
+    -q <qid[-qid]>               Set range of hardware queues to work on e.g. -q 1 or -q 1-3.
+                                 Specifying multiple queues will launch a thread for each queue except if -p poll
+    -m <native|offload|generic>  Set XDP mode to 'native', 'offload', or 'generic'. Default: native
+    -c                           Enforce XDP Copy mode, default is zero-copy mode
+    -v                           Verbose
+    -b <size>                    Set batch size. Default: 64
+    -w                           Use XDP need wakeup flag
+    -p <poll|rtc>                Enforce poll or run-to-completion mode. Default: rtc
+    -s <nb_xsks>                 Set number of sockets working on shared umem
+    -t <tx-packet-size>          Set txonly packet size
+    -u                           Use unaligned memory for UMEM
+    -A <irq1,irq2,...>           Set affinity mapping between application threads and drivers queues
+                                 e.g. q1 to irq1, q2 to irq2,...
+    -I <irq_string>              `grep` regex to read and count interrupts of interface from /proc/interrupts
+    -M <rxdrop|txonly|l2fwd>     Set Microbenchmark. Default: rxdrop
+    -B                           Enable NAPI busy-poll
+    -D <dmac>                    Set destination MAC address for txonly
+    -H                           Considering Hyper-threading is enabled, this flag will assign affinity
+                                 of softirq and the app to two logical cores of the same physical core.
+    -G                           Activate Huge Pages for UMEM allocation
+    -S                           Run IRQ and App on same core
+```
