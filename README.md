@@ -29,6 +29,10 @@ Pktgen-dpdk is used to generate packets of different packet sizes. A guide how t
 ### Using veth
 We provide scripts to run our benchmarks using virtual interfaces on the same machine (just for testing purposes). Details in [docs/veth](docs/veth.md)
 
+### `mlx5` MPWQE Inlining Algorithm
+Disable `mlx5` MPWQE Inlining Algorithm in the source code using the patch available in `mlx5-disable-inlining.patch`.
+Apply the patch using: `patch -p0 < mlx5-disable-inlining.patch` in the kernel source code, compile and install the modified kernel then restart the server using this kernel.
+
 ## Running
 
 ```bash
