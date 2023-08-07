@@ -1,24 +1,24 @@
---- drivers/net/ethernet/mellanox/mlx5/core/en/xdp.h	2023-07-12 08:50:45.873135574 +0000
-+++ "drivers/net/ethernet/mellanox/mlx5/core/en/xdp copy.h"	2023-07-12 08:50:12.801550308 +0000
-@@ -108,9 +108,18 @@
+--- drivers/net/ethernet/mellanox/mlx5/core/en/xdp.h	2023-07-12 08:50:12.801550308 +0000
++++ drivers/net/ethernet/mellanox/mlx5/core/en/xdp.h	2023-07-12 08:50:45.873135574 +0000
+@@ -108,18 +108,9 @@
   */
  static inline bool mlx5e_xdp_get_inline_state(struct mlx5e_xdpsq *sq, bool cur)
  {
--    (void) sq;
--    (void) cur;
--    return false;
-+	u16 outstanding = sq->xdpi_fifo_pc - sq->xdpi_fifo_cc;
-+
-+#define MLX5E_XDP_INLINE_WATERMARK_LOW	10
-+#define MLX5E_XDP_INLINE_WATERMARK_HIGH 128
-+
-+	if (cur && outstanding <= MLX5E_XDP_INLINE_WATERMARK_LOW)
-+		return false;
-+
-+	if (!cur && outstanding >= MLX5E_XDP_INLINE_WATERMARK_HIGH)
-+		return true;
-+
-+	return cur;
+-	u16 outstanding = sq->xdpi_fifo_pc - sq->xdpi_fifo_cc;
+-
+-#define MLX5E_XDP_INLINE_WATERMARK_LOW	10
+-#define MLX5E_XDP_INLINE_WATERMARK_HIGH 128
+-
+-	if (cur && outstanding <= MLX5E_XDP_INLINE_WATERMARK_LOW)
+-		return false;
+-
+-	if (!cur && outstanding >= MLX5E_XDP_INLINE_WATERMARK_HIGH)
+-		return true;
+-
+-	return cur;
++    (void) sq;
++    (void) cur;
++    return false;
  }
  
  static inline bool mlx5e_xdp_mpwqe_is_full(struct mlx5e_tx_mpwqe *session, u8 max_sq_mpw_wqebbs)
