@@ -30,8 +30,8 @@
 #include <netpacket/packet.h>
 #include <string.h>
 #include <numaif.h>
+#include <arpa/inet.h>
 
-// #include <rte_memcpy.h>
 #include "dqdk.h"
 #include "tcpip/ipv4.h"
 #include "tcpip/udp.h"
@@ -64,6 +64,9 @@ struct xsk_stat {
     u64 runtime;
     u64 tx_wakeup_sendtos;
     u64 sent_frames;
+    u64 tristan_drop;
+    u64 tristan_outoforder;
+    u64 tristan_dups;
     struct xdp_statistics xstats;
 };
 
@@ -95,7 +98,7 @@ typedef struct {
     u32 outstanding_tx;
     struct xsk_stat stats;
     u8* large_mem;
-
+    int last_idx;
 } xsk_info;
 
 volatile u32 break_flag = 0;
@@ -194,7 +197,7 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
     }
 
     ret = xsk_socket__create_shared(&xsk->socket, ifname, xsk->queue_id,
-        xsk->umem_info->umem, &xsk->rx, &xsk->tx, fq, cq, &xsk_config);
+        xsk->umem_info->umem, &xsk->rx, NULL, fq, cq, &xsk_config);
     if (ret) {
         dlog_error2("xsk_socket__create", ret);
         return ret;
@@ -333,31 +336,45 @@ static always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
     }
     xsk->stats.rx_successful_fills++;
     for (int i = 0; i < rcvd; i++) {
-        u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr, orig;
+        u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
 
-        if (umem->flags & UMEM_FLAGS_UNALIGNED) {
-            orig = xsk_umem__extract_addr(addr);
-            addr = xsk_umem__add_offset_to_addr(addr);
-        }
+        // u64 orig;
+        // if (umem->flags & UMEM_FLAGS_UNALIGNED) {
+        //     orig = xsk_umem__extract_addr(addr);
+        //     addr = xsk_umem__add_offset_to_addr(addr);
+        // }
 
-#ifdef UDP_MODE
         u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
         u8* frame = xsk_umem__get_data(umem->buffer, addr);
         u8* data = process_frame(xsk, frame, len, &datalen);
         memcpy(xsk->large_mem, data, datalen);
-#else
-        xsk_umem__get_data(umem->buffer, addr);
-#endif
-        idx_rx++;
-        if (umem->flags & UMEM_FLAGS_UNALIGNED) {
-            *xsk_ring_prod__fill_addr(fq, idx_fq) = orig;
+
+        u16* nt_counter = (u16*)data;
+        u16 hst_counter = ntohs(*nt_counter);
+
+        if (xsk->last_idx == -1) {
+            xsk->last_idx = hst_counter;
+            continue;
         }
+
+        int diff = hst_counter - (xsk->last_idx % UINT16_MAX);
+        if (diff == 0 && hst_counter != 0) {
+            xsk->stats.tristan_dups++;
+        } else if (diff > 1) {
+            xsk->stats.tristan_drop++;
+        } else if (diff < 0) {
+            xsk->stats.tristan_outoforder++;
+        }
+        xsk->last_idx = hst_counter;
+
+        idx_rx++;
+        // if (umem->flags & UMEM_FLAGS_UNALIGNED) {
+        //     *xsk_ring_prod__fill_addr(fq, idx_fq) = orig;
+        // }
         idx_fq++;
     }
 
-#ifndef UDP_MODE
     xsk->stats.rcvd_frames += rcvd;
-#endif
 
     xsk_ring_cons__release(&xsk->rx, rcvd);
     xsk_ring_prod__submit(fq, rcvd);
@@ -775,7 +792,10 @@ void stats_dump(struct xsk_stat* stats)
            "    X-XSK RX Invalid Descs:   %llu\n"
            "    X-XSK RX Ring Full:       %llu\n"
            "    X-XSK TX Invalid Descs:   %llu\n"
-           "    X-XSK TX Ring Empty:      %llu\n",
+           "    X-XSK TX Ring Empty:      %llu\n"
+           "    TRISTAN Drop:             %llu\n"
+           "    TRISTAN Out-of-Order:     %llu\n"
+           "    TRISTAN Duplicates:       %llu\n",
         stats->runtime, stats->rcvd_frames,
         AVG_PPS(stats->rcvd_frames, stats->runtime), stats->rcvd_pkts,
         AVG_PPS(stats->rcvd_pkts, stats->runtime), stats->sent_frames,
@@ -788,7 +808,8 @@ void stats_dump(struct xsk_stat* stats)
 
         stats->xstats.rx_dropped, stats->xstats.rx_fill_ring_empty_descs,
         stats->xstats.rx_invalid_descs, stats->xstats.rx_ring_full,
-        stats->xstats.tx_invalid_descs, stats->xstats.tx_ring_empty_descs);
+        stats->xstats.tx_invalid_descs, stats->xstats.tx_ring_empty_descs,
+        stats->tristan_drop, stats->tristan_outoforder, stats->tristan_dups);
 }
 
 void xsk_stats_dump(xsk_info* xsk)
@@ -908,12 +929,6 @@ int dqdk_set_affinity(int ht, int samecore, int irq, unsigned long* cpumask, cpu
 
 int main(int argc, char** argv)
 {
-#ifdef UDP_MODE
-    dlog_info("UDP Compilation!");
-#else
-    dlog_info("RX_DROP Compilation!");
-#endif
-
     // options values
     char *opt_ifname = NULL, *opt_irqstring = NULL;
     u8 opt_dmac[6] = { 0 };
@@ -1361,6 +1376,7 @@ int main(int argc, char** argv)
     // large_mem = huge_malloc(LARGE_MEMSZ);
 
     for (u32 i = 0; i < nbxsks; i++) {
+        xsks[i].last_idx = -1;
         xsks[i].tx_pkt_size = opt_txpktsize;
         xsks[i].batch_size = opt_batchsize;
         xsks[i].busy_poll = opt_busy_poll;
@@ -1513,6 +1529,10 @@ int main(int argc, char** argv)
         avg_stats.xstats.rx_ring_full += xsks[i].stats.xstats.rx_ring_full;
         avg_stats.xstats.rx_fill_ring_empty_descs += xsks[i].stats.xstats.rx_fill_ring_empty_descs;
         avg_stats.xstats.tx_ring_empty_descs += xsks[i].stats.xstats.tx_ring_empty_descs;
+
+        avg_stats.tristan_drop += xsks[i].stats.tristan_drop;
+        avg_stats.tristan_outoforder += xsks[i].stats.tristan_outoforder;
+        avg_stats.tristan_dups += xsks[i].stats.tristan_dups;
     }
 
     finished = 1;
