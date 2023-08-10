@@ -283,6 +283,10 @@ always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len, u32* datalen
         return NULL;
     }
 
+    if (packet->protocol != IPPROTO_UDP) {
+        return NULL;
+    }
+
     if (!ip4_audit(packet, len - sizeof(struct ethhdr))) {
         xsk->stats.invalid_ip_pkts++;
         return NULL;
@@ -291,13 +295,13 @@ always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len, u32* datalen
     u32 iphdrsz = ip4_get_header_size(packet);
     u32 udplen = ntohs(packet->tot_len) - iphdrsz;
     struct udphdr* udp = (struct udphdr*)(((u8*)packet) + iphdrsz);
-    // if (!udp_audit(packet, iphdrsz, udp, udplen)) {
-    // udp_audit(struct udphdr* udp, u32 src_ip, u32 dst_ip, u16 udplen)
+
     if (!udp_audit(udp, packet->saddr, packet->daddr, udplen)) {
         xsk->stats.invalid_udp_pkts++;
         return NULL;
     }
-    *datalen = udplen;
+
+    *datalen = udplen - sizeof(struct udphdr);
     return (u8*)(udp + 1);
 }
 
@@ -347,30 +351,30 @@ static always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
         u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
         u8* frame = xsk_umem__get_data(umem->buffer, addr);
         u8* data = process_frame(xsk, frame, len, &datalen);
-        memcpy(xsk->large_mem, data, datalen);
 
-        u16* nt_counter = (u16*)data;
-        u16 hst_counter = ntohs(*nt_counter);
+        if (datalen != 0 && data != NULL) {
+            memcpy(xsk->large_mem, data, datalen);
+            u16* nt_counter = (u16*)data;
+            u16 hst_counter = ntohs(nt_counter[0]);
 
-        if (xsk->last_idx == -1) {
+            if (xsk->last_idx != -1) {
+                int diff = hst_counter - (xsk->last_idx % UINT16_MAX);
+                if (diff == 0 && hst_counter != 0) {
+                    xsk->stats.tristan_dups++;
+                } else if (diff > 1) {
+                    xsk->stats.tristan_drop++;
+                } else if (diff < 0) {
+                    xsk->stats.tristan_outoforder++;
+                }
+            }
+
             xsk->last_idx = hst_counter;
-            continue;
         }
 
-        int diff = hst_counter - (xsk->last_idx % UINT16_MAX);
-        if (diff == 0 && hst_counter != 0) {
-            xsk->stats.tristan_dups++;
-        } else if (diff > 1) {
-            xsk->stats.tristan_drop++;
-        } else if (diff < 0) {
-            xsk->stats.tristan_outoforder++;
-        }
-        xsk->last_idx = hst_counter;
-
-        idx_rx++;
         // if (umem->flags & UMEM_FLAGS_UNALIGNED) {
         //     *xsk_ring_prod__fill_addr(fq, idx_fq) = orig;
         // }
+        idx_rx++;
         idx_fq++;
     }
 
@@ -809,7 +813,7 @@ void stats_dump(struct xsk_stat* stats)
         stats->xstats.rx_dropped, stats->xstats.rx_fill_ring_empty_descs,
         stats->xstats.rx_invalid_descs, stats->xstats.rx_ring_full,
         stats->xstats.tx_invalid_descs, stats->xstats.tx_ring_empty_descs,
-        stats->tristan_drop, stats->tristan_outoforder, stats->tristan_dups);
+        stats->tristan_drop - stats->tristan_outoforder, stats->tristan_outoforder, stats->tristan_dups);
 }
 
 void xsk_stats_dump(xsk_info* xsk)
