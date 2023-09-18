@@ -1,5 +1,7 @@
 # AF_XDP Performance Evaluation
 
+[![DOI](https://zenodo.org/badge/448600339.svg)](https://zenodo.org/badge/latestdoi/448600339)
+
 ## Build
 
 For Ubuntu
