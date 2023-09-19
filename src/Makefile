@@ -5,10 +5,10 @@ EXTRA_USER_DEPS := tcpip/* dlog.h dqdk.h
 TEST_FILE       := 
 
 LIB_DIR          = $(abspath ../xdp-tools/lib)
-USER_LIBS       := -lpthread -lnuma
+USER_LIBS       := -lpthread -lnuma -lm
 MAN_PAGE        :=
 
-USER_DEFINES    += -g -mavx2
+USER_DEFINES    += -O3 -Wno-maybe-uninitialized -mavx2 
 CFLAGS          += -I$(realpath .) $(USER_DEFINES)
 BPF_CFLAGS      += -I$(realpath .)
 

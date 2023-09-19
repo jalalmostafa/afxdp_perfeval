@@ -5,7 +5,8 @@
         "*.targets": "xml",
         "*.h": "c",
         "*.c": "c",
-        "random": "c"
+        "random": "c",
+        "algorithm": "c"
     },
     "C_Cpp.errorSquiggles": "disabled",
     "[python]": {

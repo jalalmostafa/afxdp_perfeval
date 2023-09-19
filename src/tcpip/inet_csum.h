@@ -33,7 +33,10 @@
 
 #include <linux/types.h>
 #include "../dqdk.h"
+
+#ifdef USE_SIMD
 #include "inet_csum_simd.h"
+#endif
 
 /*
  * This function code has been taken from
@@ -184,17 +187,9 @@ always_inline u16 udp_csum(u32 saddr, u32 daddr, u32 len,
     u8 proto, u16* udp_pkt)
 {
     u32 sum = 0;
-    // u32 cnt = 0;
-
-/* udp hdr and data */
-// original: 260k pps
-// for (; cnt < len; cnt += 2) {
-//     sum += udp_pkt[cnt >> 1];
-// }
-
 // loop unrolling: 4 bytes: 420kpps - 8 bytes: 520kpps - 16 bytes: 580kpps - 32 bytes: 696kpps - 64bytes: 760kpps - 128bytes: 780kpps -
-#define DIVSOR 128
-#define DIVCOF 7
+// #define DIVSOR 128
+// #define DIVCOF 7
     // u32 nearestmulti = (len >> DIVCOF) << DIVCOF; // divide by 8
     // u32 rem = len & (DIVSOR - 1); // remainder of division by 8
     // for (; cnt < nearestmulti; cnt += DIVSOR) {
@@ -209,8 +204,16 @@ always_inline u16 udp_csum(u32 saddr, u32 daddr, u32 len,
     //     }
     // }
 
+#ifdef USE_SIMD
     // AVX2: 1.26Mpps
     sum = udp_csum_avx2(udp_pkt, len);
+#else
+    // original: 260k pps
+    u32 cnt = 0;
+    for (; cnt < len; cnt += 2) {
+        sum += udp_pkt[cnt >> 1];
+    }
+#endif
     return csum_tcpudp_magic(saddr, daddr, len, proto, sum);
 }
 

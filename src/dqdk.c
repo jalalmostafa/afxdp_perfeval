@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 #define _GNU_SOURCE
+// #define USE_SIMD
 
 #include <arpa/inet.h>
 #include <bpf/bpf.h>
@@ -31,6 +32,8 @@
 #include <string.h>
 #include <numaif.h>
 #include <arpa/inet.h>
+#include <math.h>
+#include <rte_memcpy.h>
 
 #include "dqdk.h"
 #include "tcpip/ipv4.h"
@@ -49,6 +52,8 @@
 #define UMEM_FLAGS_USE_HGPG (1 << 0)
 #define UMEM_FLAGS_UNALIGNED (1 << 1)
 #define LARGE_MEMSZ ((u64)100 * 1024 * 1024 * 1024)
+
+static int HISTO[UINT16_MAX] = { 0 };
 
 struct xsk_stat {
     u64 rcvd_frames;
@@ -272,12 +277,11 @@ always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len, u32* datalen
     struct ethhdr* frame = (struct ethhdr*)buffer;
     u16 ethertype = ntohs(frame->h_proto);
 
-    xsk->stats.rcvd_frames++;
     if (ethertype != ETH_P_IP) {
         return NULL;
     }
 
-    xsk->stats.rcvd_pkts++;
+    ++xsk->stats.rcvd_pkts;
     struct iphdr* packet = (struct iphdr*)(frame + 1);
     if (packet->version != 4) {
         return NULL;
@@ -288,7 +292,7 @@ always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len, u32* datalen
     }
 
     if (!ip4_audit(packet, len - sizeof(struct ethhdr))) {
-        xsk->stats.invalid_ip_pkts++;
+        ++xsk->stats.invalid_ip_pkts;
         return NULL;
     }
 
@@ -338,8 +342,9 @@ static always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
 
         ret = xsk_ring_prod__reserve(fq, rcvd, &idx_fq);
     }
-    xsk->stats.rx_successful_fills++;
-    for (int i = 0; i < rcvd; i++) {
+
+    ++xsk->stats.rx_successful_fills;
+    for (int i = 0; i < rcvd; ++i) {
         u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
 
         // u64 orig;
@@ -353,18 +358,19 @@ static always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
         u8* data = process_frame(xsk, frame, len, &datalen);
 
         if (datalen != 0 && data != NULL) {
-            memcpy(xsk->large_mem, data, datalen);
+            // memcpy(xsk->large_mem, data, datalen);
+            rte_memcpy(xsk->large_mem, data, datalen);
             u16* nt_counter = (u16*)data;
             u16 hst_counter = ntohs(nt_counter[0]);
-
+            ++HISTO[hst_counter];
             if (xsk->last_idx != -1) {
                 int diff = hst_counter - (xsk->last_idx % UINT16_MAX);
                 if (diff == 0 && hst_counter != 0) {
-                    xsk->stats.tristan_dups++;
+                    ++xsk->stats.tristan_dups;
                 } else if (diff > 1) {
-                    xsk->stats.tristan_drop++;
+                    ++xsk->stats.tristan_drop;
                 } else if (diff < 0) {
-                    xsk->stats.tristan_outoforder++;
+                    ++xsk->stats.tristan_outoforder;
                 }
             }
 
@@ -374,8 +380,8 @@ static always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
         // if (umem->flags & UMEM_FLAGS_UNALIGNED) {
         //     *xsk_ring_prod__fill_addr(fq, idx_fq) = orig;
         // }
-        idx_rx++;
-        idx_fq++;
+        ++idx_rx;
+        ++idx_fq;
     }
 
     xsk->stats.rcvd_frames += rcvd;
@@ -954,7 +960,7 @@ int main(int argc, char** argv)
     u16 opt_txpktsize = 64;
 
     // program variables
-    int ifindex, ret, opt;
+    int ifindex, ret, opt, timer_flag = -1;
     u32 nbqueues = 0, nbirqs = 0, nprocs = 0, umem_size = UMEM_SIZE;
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
     interrupts_t *before_interrupts = NULL, *after_interrupts = NULL;
@@ -1014,6 +1020,7 @@ int main(int argc, char** argv)
             }
             break;
         case 'd':
+            timer_flag = 1;
             opt_duration.it_interval.tv_sec = atoi(optarg);
             opt_duration.it_interval.tv_nsec = 0;
             opt_duration.it_value.tv_sec = opt_duration.it_interval.tv_sec;
@@ -1368,11 +1375,13 @@ int main(int argc, char** argv)
         }
     }
 
-    struct sigevent sigv;
-    sigv.sigev_notify = SIGEV_SIGNAL;
-    sigv.sigev_signo = SIGUSR1;
-    timer_create(CLOCK_MONOTONIC, &sigv, &timer);
-    timer_settime(timer, 0, &opt_duration, NULL);
+    if (timer_flag > 0) {
+        struct sigevent sigv;
+        sigv.sigev_notify = SIGEV_SIGNAL;
+        sigv.sigev_signo = SIGUSR1;
+        timer_create(CLOCK_MONOTONIC, &sigv, &timer);
+        timer_settime(timer, 0, &opt_duration, NULL);
+    }
 
     if (opt_irqstring != NULL) {
         before_interrupts = nic_get_interrupts(opt_irqstring, nprocs);
@@ -1539,6 +1548,18 @@ int main(int argc, char** argv)
         avg_stats.tristan_dups += xsks[i].stats.tristan_dups;
     }
 
+    printf("Histogram here\n");
+    double avg = 0, sd = 0;
+    size_t count = UINT16_MAX;
+    for (size_t i = 0; i < count; i++)
+        avg += HISTO[i];
+    avg = avg / count;
+    printf("Avg Window Count: %f\n", avg);
+    for (size_t i = 0; i < count; ++i)
+        sd += pow(HISTO[i] - avg, 2);
+    sd = sqrt(sd / count);
+    printf("STD. Dev. %f\n", sd);
+
     finished = 1;
     if (opt_irqstring != NULL)
         after_interrupts = nic_get_interrupts(opt_irqstring, nprocs);
@@ -1587,7 +1608,10 @@ cleanup:
         free(after_interrupts);
     }
 
-    timer_delete(timer);
+    if (timer_flag > 0) {
+        timer_delete(timer);
+    }
+
     if (kern_prog != NULL) {
         xdp_program__detach(kern_prog, ifindex, opt_mode, 0);
         xdp_program__close(kern_prog);
