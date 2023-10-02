@@ -64,3 +64,47 @@ Arguments:
     -G                           Activate Huge Pages for UMEM allocation
     -S                           Run IRQ and App on same core
 ```
+
+## Driver Support (as of Linux v6.5-rc2)
+
+| Vendor                   | Driver           | Mode           | Need Wake Up      |
+| ------------------------ | ---------------- | -------------- | ----------------- |
+| Intel                    | i40e             | ZC/C           | Y                 |
+|                          | ice              | ZC/C           | Y                 |
+|                          | igb              | C              | N                 |
+|                          | igc              | ZC/C           | Y                 |
+|                          | ixgbe            | ZC/C           | Y                 |
+|                          | ixgbevf          | C              | N                 |
+| NVIDIA/Mellanox          | mlx5             | ZC/C           | Y                 |
+|                          | mlx4             | C              | N                 |
+| Broadcom                 | bnxt             | C              | N                 |
+| Netronome/Corigine       | nfp              | ZC/C           | N                 |
+| Marvell                  | mvneta           | C              | N                 |
+|                          | mvpp2            | C              | N                 |
+|                          | octeontx2        | C              | N                 |
+| Qlogic (now Marvell)     | qede             | C              | N                 |
+| Cavium (now Marvell)     | thunder          | C              | N                 |
+| Aquantia (now Marvell)   | atlantic         | C              | N                 |
+| MediaTek                 | mtk              | C              | N                 |
+| MicroChip                | lan966x          | C              | N                 |
+| SolarFlare (now Xilinx)  | efx              | C              | N                 |
+|                          | siena-efx        | C              | N                 |
+| SocioNext                | netsec           | C              | N                 |
+| STMicroelectronics       | stmmac           | ZC/C           | Y                 |
+| Texas Instruments        | cpsw             | C              | N                 |
+| Freescale (now NXP)      | dpaa             | C              | N                 |
+|                          | dpaa2            | ZC/C           | N                 |
+|                          | enetc            | C              | N                 |
+|                          | fec              | C              | N                 |
+| Engleder                 | tsnep            | ZC/C           | Y                 |
+| Fungible (now Microsoft) | funeth           | C              | N                 |
+| Microsoft                | mana             | C              | N                 |
+| Microsoft Hyper-V        | netvsc           | C              | N                 |
+| Amazon                   | ena              | C              | N                 |
+| Google                   | gve              | ZC/C           | only on TX path   |
+| Xen                      | netfront         | C              | N                 |
+| VirtIO                   | virtio\_net      | C              | N                 |
+| Linux                    | tun              | C              | N                 |
+|                          | veth             | C              | N                 |
+|                          | bonding          | C              | N                 |
+|                          | netdevsim        | C              | N                 |
