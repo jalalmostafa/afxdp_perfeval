@@ -53,8 +53,6 @@
 #define UMEM_FLAGS_UNALIGNED (1 << 1)
 #define LARGE_MEMSZ ((u64)100 * 1024 * 1024 * 1024)
 
-static int HISTO[UINT16_MAX] = { 0 };
-
 struct xsk_stat {
     u64 rcvd_frames;
     u64 rcvd_pkts;
@@ -69,7 +67,6 @@ struct xsk_stat {
     u64 runtime;
     u64 tx_wakeup_sendtos;
     u64 sent_frames;
-    u64 tristan_drop;
     u64 tristan_outoforder;
     u64 tristan_dups;
     struct xdp_statistics xstats;
@@ -272,7 +269,7 @@ static void pktgen_fill_umem(umem_info* umem, u8* dmac, u8* smac, u32 to, u16 pk
     }
 }
 
-always_inline u8* process_frame(xsk_info* xsk, u8* buffer, u32 len, u32* datalen)
+always_inline u8* get_udp_payload(xsk_info* xsk, u8* buffer, u32 len, u32* datalen)
 {
     struct ethhdr* frame = (struct ethhdr*)buffer;
     u16 ethertype = ntohs(frame->h_proto);
@@ -344,6 +341,7 @@ static always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
     }
 
     ++xsk->stats.rx_successful_fills;
+
     for (int i = 0; i < rcvd; ++i) {
         u64 addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
 
@@ -355,21 +353,19 @@ static always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
 
         u32 len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->len;
         u8* frame = xsk_umem__get_data(umem->buffer, addr);
-        u8* data = process_frame(xsk, frame, len, &datalen);
+        u8* data = get_udp_payload(xsk, frame, len, &datalen);
 
         if (datalen != 0 && data != NULL) {
-            // memcpy(xsk->large_mem, data, datalen);
-            rte_memcpy(xsk->large_mem, data, datalen);
-            u16* nt_counter = (u16*)data;
-            u16 hst_counter = ntohs(nt_counter[0]);
-            ++HISTO[hst_counter];
+            memcpy(xsk->large_mem, data, datalen);
+            // rte_memcpy(xsk->large_mem, data, datalen);
+            u64* nt_counter = (u64*)data;
+            u64 hst_counter = nt_counter[0];
+
             if (xsk->last_idx != -1) {
-                int diff = hst_counter - (xsk->last_idx % UINT16_MAX);
-                if (diff == 0 && hst_counter != 0) {
+                int diff = hst_counter - xsk->last_idx;
+                if (diff == 0) {
                     ++xsk->stats.tristan_dups;
-                } else if (diff > 1) {
-                    ++xsk->stats.tristan_drop;
-                } else if (diff < 0) {
+                } else {
                     ++xsk->stats.tristan_outoforder;
                 }
             }
@@ -803,7 +799,6 @@ void stats_dump(struct xsk_stat* stats)
            "    X-XSK RX Ring Full:       %llu\n"
            "    X-XSK TX Invalid Descs:   %llu\n"
            "    X-XSK TX Ring Empty:      %llu\n"
-           "    TRISTAN Drop:             %llu\n"
            "    TRISTAN Out-of-Order:     %llu\n"
            "    TRISTAN Duplicates:       %llu\n",
         stats->runtime, stats->rcvd_frames,
@@ -819,7 +814,7 @@ void stats_dump(struct xsk_stat* stats)
         stats->xstats.rx_dropped, stats->xstats.rx_fill_ring_empty_descs,
         stats->xstats.rx_invalid_descs, stats->xstats.rx_ring_full,
         stats->xstats.tx_invalid_descs, stats->xstats.tx_ring_empty_descs,
-        stats->tristan_drop - stats->tristan_outoforder, stats->tristan_outoforder, stats->tristan_dups);
+        stats->tristan_outoforder, stats->tristan_dups);
 }
 
 void xsk_stats_dump(xsk_info* xsk)
@@ -1543,22 +1538,9 @@ int main(int argc, char** argv)
         avg_stats.xstats.rx_fill_ring_empty_descs += xsks[i].stats.xstats.rx_fill_ring_empty_descs;
         avg_stats.xstats.tx_ring_empty_descs += xsks[i].stats.xstats.tx_ring_empty_descs;
 
-        avg_stats.tristan_drop += xsks[i].stats.tristan_drop;
         avg_stats.tristan_outoforder += xsks[i].stats.tristan_outoforder;
         avg_stats.tristan_dups += xsks[i].stats.tristan_dups;
     }
-
-    printf("Histogram here\n");
-    double avg = 0, sd = 0;
-    size_t count = UINT16_MAX;
-    for (size_t i = 0; i < count; i++)
-        avg += HISTO[i];
-    avg = avg / count;
-    printf("Avg Window Count: %f\n", avg);
-    for (size_t i = 0; i < count; ++i)
-        sd += pow(HISTO[i] - avg, 2);
-    sd = sqrt(sd / count);
-    printf("STD. Dev. %f\n", sd);
 
     finished = 1;
     if (opt_irqstring != NULL)

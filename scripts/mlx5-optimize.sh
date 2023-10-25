@@ -35,7 +35,7 @@ tx-scatter-gather off tx-vlan-stag-hw-insert off ntuple on rx-vlan-filter off \
 tx-gre-csum-segmentation off tx-tcp-mangleid-segmentation off txvlan off rx off \
 rxhash on tx-gre-segmentation off tx-tcp-segmentation off rx-all off rxvlan off \
 tx-gso-partial off tx-tcp6-segmentation off rx-checksumming off tx-checksumming off
-ethtool --set-priv-flags $NIC rx_cqe_compress on
+# ethtool --set-priv-flags $NIC rx_cqe_compress on
 
 # read -p "Set PCI MaxReadReq to 1024? [y/n]..." -n 1 answer
 # echo ""

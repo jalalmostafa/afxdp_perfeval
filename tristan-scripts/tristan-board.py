@@ -3,7 +3,7 @@ import sys
 import socket
 import math
 import sys
-
+import time
 
 class TristanBoard:
     CYCLE_TIME = 3.1e-9  # in nanoseconds
@@ -22,7 +22,7 @@ class TristanBoard:
         period = mtu_size / (linkspeed * 1e9 / 8)
         self.setupx(txport, pktlen, period)
 
-    def setupx(self, txport, pktlen, period):
+    def setupx(self, txport, pktlen, period, nbpkts):
         self._write_reg(4, txport)
         port_rs = self._read_reg(4)
         print(f'TX Port: Requested={txport}, Set={port_rs}')
@@ -35,6 +35,26 @@ class TristanBoard:
         self._write_reg(6, pktlen)
         pktlen_rs = self._read_reg(6)
         print(f'TX Pkt Length: Requested={pktlen}, Set={pktlen_rs}')
+
+        self._set_nb_packets(nbpkts)
+        nbpkts_rs = self._get_nb_packets()
+        print(f'Number Pkt: Requested={nbpkts}, Set={nbpkts_rs}')
+
+    def _set_nb_packets(self, nbpackets):
+        reg8value = nbpackets & 0xFFFFFFFF
+        reg9value = (nbpackets >> 32) & 0xFFFFFFFF
+
+        self._write_reg(8, reg8value)
+        self._write_reg(9, reg9value)
+
+    def _get_nb_packets(self,):
+        reg8value = self._read_reg(8)
+        reg9value = self._read_reg(9)
+
+        if reg8value is None or reg9value is None:
+            return None
+
+        return reg8value | ((reg9value << 32) & 0xFFFFFFFF00000000)
 
     def start(self):
         self._write_reg(7, 1)
@@ -87,7 +107,7 @@ class TristanBoard:
 
 
 def help():
-    print('tristan.py setup txport pktlen linkspeed')
+    print('tristan.py setup txport pktlen linkspeed nbpkts')
     print('tristan.py start')
     print('tristan.py stop')
 
@@ -109,13 +129,17 @@ if __name__ == '__main__':
             tristan.setup(txport, pktlen, linkspeed)
         tristan.start()
     elif cmd == 'startx':
-        if len(args) == 5:
+        if len(args) == 6:
             tristan.stop()
             txport = int(args[2])
             pktlen = int(args[3])
             period = float(args[4])
-            tristan.setupx(txport, pktlen, period)
+            nbpkts = int(args[5])
+            tristan.setupx(txport, pktlen, period, nbpkts)
         tristan.start()
+        secs = math.ceil(period * nbpkts)
+        print('Sleeping for...', secs)
+        time.sleep(secs)
     elif cmd == 'stop':
         tristan.stop()
     elif cmd == 'setup' and len(args) == 5:
@@ -123,11 +147,12 @@ if __name__ == '__main__':
         pktlen = int(args[3])
         linkspeed = int(args[4])
         tristan.setup(txport, pktlen, linkspeed)
-    elif cmd == 'setupx' and len(args) == 5:
+    elif cmd == 'setupx' and len(args) == 6:
         txport = int(args[2])
         pktlen = int(args[3])
         period = float(args[4])
-        tristan.setupx(txport, pktlen, period)
+        nbpkts = int(args[5])
+        tristan.setupx(txport, pktlen, period, nbpkts)
     elif cmd == 'query':
         tristan.query_all()
     else:
