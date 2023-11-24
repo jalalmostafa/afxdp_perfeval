@@ -5,6 +5,7 @@ import math
 import sys
 import time
 
+
 class TristanBoard:
     CYCLE_TIME = 3.1e-9  # in nanoseconds
 
@@ -23,9 +24,30 @@ class TristanBoard:
         self.setupx(txport, pktlen, period)
 
     def setupx(self, txport, pktlen, period, nbpkts):
-        self._write_reg(4, txport)
-        port_rs = self._read_reg(4)
-        print(f'TX Port: Requested={txport}, Set={port_rs}')
+        ports = txport.split('-')
+        try:
+            ports = list(map(lambda x: int(x), ports))
+            start_txport = ports[0]
+
+            self._write_reg(4, start_txport)
+            port_rs = self._read_reg(4, custom_port=start_txport)
+            print(f'Start TX Port: Requested={start_txport}, Set={port_rs}')
+            
+            if len(ports) == 2:
+                end_txport = ports[1]
+                port_rs = None
+                if start_txport > end_txport:
+                    print('Start Port cannot be larger than end port')
+                    return
+
+                self._write_reg(10, end_txport)
+                port_rs = self._read_reg(10, custom_port=end_txport)
+                print(f'End TX Port: Requested={end_txport}, Set={port_rs}')
+
+        except Exception as e:
+            print(e)
+            return
+        
 
         cycles = math.ceil(period / TristanBoard.CYCLE_TIME)
         self._write_reg(5, cycles)
@@ -83,8 +105,8 @@ class TristanBoard:
     def _write_reg(self, reg, value):
         return self._write_to_device(f'w{reg:08X}_{value:08X}')
 
-    def _read_reg(self, reg):
-        hexval = self._read_from_device(f'r{reg:08X}')
+    def _read_reg(self, reg, custom_port=None):
+        hexval = self._read_from_device(f'r{reg:08X}', custom_port=custom_port)
         return int(hexval, 16) if hexval is not None else None
 
     def _write_to_device(self, msg):
@@ -93,12 +115,13 @@ class TristanBoard:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             return sock.sendto(msg, (self.ip, self.port))
 
-    def _read_from_device(self, msg):
+    def _read_from_device(self, msg, custom_port: int = None):
         msg_binary = msg.encode('ascii')
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(1)
             try:
-                sock.sendto(msg_binary, (self.ip, self.port))
+                sock.sendto(
+                    msg_binary, (self.ip, self.port if custom_port is None else custom_port))
                 resp_data, _ = sock.recvfrom(1024)
                 return resp_data.decode('ascii')[:8]
             except socket.timeout:
@@ -123,7 +146,7 @@ if __name__ == '__main__':
     if cmd == 'start':
         if len(args) == 5:
             tristan.stop()
-            txport = int(args[2])
+            txport = args[2]
             pktlen = int(args[3])
             linkspeed = int(args[4])
             tristan.setup(txport, pktlen, linkspeed)
@@ -131,7 +154,7 @@ if __name__ == '__main__':
     elif cmd == 'startx':
         if len(args) == 6:
             tristan.stop()
-            txport = int(args[2])
+            txport = args[2]
             pktlen = int(args[3])
             period = float(args[4])
             nbpkts = int(args[5])
@@ -143,12 +166,12 @@ if __name__ == '__main__':
     elif cmd == 'stop':
         tristan.stop()
     elif cmd == 'setup' and len(args) == 5:
-        txport = int(args[2])
+        txport = args[2]
         pktlen = int(args[3])
         linkspeed = int(args[4])
         tristan.setup(txport, pktlen, linkspeed)
     elif cmd == 'setupx' and len(args) == 6:
-        txport = int(args[2])
+        txport = args[2]
         pktlen = int(args[3])
         period = float(args[4])
         nbpkts = int(args[5])

@@ -33,13 +33,14 @@
 #include <numaif.h>
 #include <arpa/inet.h>
 #include <math.h>
-#include <rte_memcpy.h>
+// #include <rte_memcpy.h>
+#include <sys/resource.h>
 
 #include "dqdk.h"
 #include "tcpip/ipv4.h"
 #include "tcpip/udp.h"
 
-#define UMEM_FACTOR 2
+#define UMEM_FACTOR 64
 #define UMEM_LEN (XSK_RING_PROD__DEFAULT_NUM_DESCS * UMEM_FACTOR)
 #define FRAME_SIZE XSK_UMEM__DEFAULT_FRAME_SIZE
 
@@ -147,7 +148,7 @@ static int umem_configure(umem_info* umem)
     const struct xsk_umem_config cfg = {
         .fill_size = FILLQ_LEN,
         .comp_size = COMPQ_LEN,
-        .frame_size = XSK_UMEM__DEFAULT_FRAME_SIZE,
+        .frame_size = FRAME_SIZE,
         .frame_headroom = XSK_UMEM__DEFAULT_FRAME_HEADROOM,
         .flags = umem->flags & UMEM_FLAGS_UNALIGNED ? XDP_UMEM_UNALIGNED_CHUNK_FLAG : 0
     };
@@ -364,6 +365,7 @@ static always_inline int xdp_rxdrop(xsk_info* xsk, umem_info* umem)
             if (xsk->last_idx != -1) {
                 int diff = hst_counter - xsk->last_idx;
                 if (diff == 0) {
+                    printf("dups is %llu\n", hst_counter);
                     ++xsk->stats.tristan_dups;
                 } else {
                     ++xsk->stats.tristan_outoforder;
@@ -888,10 +890,10 @@ u32 dqdk_calc_affinity(int irq, int ht, int samecore, unsigned long* cpumask)
         }
         app_aff = samecore ? irq_aff : cpu_smt_sibling(irq_aff);
     } else {
-        if (smt) {
-            dlog_error("Hyper-Threading is enabled but not chosen in the configuration");
-            return (u32)-1;
-        }
+        // if (smt) {
+        //     dlog_error("Hyper-Threading is enabled but not chosen in the configuration");
+        //     return (u32)-1;
+        // }
 
         if (samecore) {
             app_aff = irq_aff;
@@ -929,6 +931,8 @@ int dqdk_set_affinity(int ht, int samecore, int irq, unsigned long* cpumask, cpu
         return ret;
     }
 
+    // struct sched_param schedp = { .sched_priority = sched_get_priority_max(SCHED_OTHER) };
+    // sched_setparam(0, &schedp);
     return sched_setaffinity(0, sizeof(cpu_set_t), cpuset);
 }
 

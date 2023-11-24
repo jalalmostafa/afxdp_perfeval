@@ -35,14 +35,14 @@ tx-scatter-gather off tx-vlan-stag-hw-insert off ntuple on rx-vlan-filter off \
 tx-gre-csum-segmentation off tx-tcp-mangleid-segmentation off txvlan off rx off \
 rxhash on tx-gre-segmentation off tx-tcp-segmentation off rx-all off rxvlan off \
 tx-gso-partial off tx-tcp6-segmentation off rx-checksumming off tx-checksumming off
-# ethtool --set-priv-flags $NIC rx_cqe_compress on
+ethtool --set-priv-flags $NIC rx_cqe_moder off rx_striding_rq off rx_no_csum_complete off xdp_tx_mpwqe off skb_tx_mpwqe off
 
 # read -p "Set PCI MaxReadReq to 1024? [y/n]..." -n 1 answer
 # echo ""
 # if [ "$answer" = "y" ]; then
     # https://enterprise-support.nvidia.com/s/article/understanding-pcie-configuration-for-maximum-performance
 r68w=`setpci -s $pci 68.w`
-new_r68w="3${r68w:1}"
+new_r68w="5${r68w:1}"
 echo "$pci: Old 68.w=$r68w. New 68.w=$new_r68w"
 setpci -s $pci 68.w=$new_r68w
 # fi
@@ -91,16 +91,16 @@ fi
 # echo 2 > /sys/class/net/$NIC/napi_defer_hard_irqs
 # echo 200000 > /sys/class/net/$NIC/gro_flush_timeout
 
-ht=`cat /sys/devices/system/cpu/smt/active`
-if [ "$ht" = "1" ]; then
-    echo "Hyper-threading is enabled!"
-    read -p "Disable Hyperthreading? [y/n]..." answer
-    if [ "$answer" = "y" ]; then
-        echo off > /sys/devices/system/cpu/smt/control
-    fi
-else
-    echo "Hyper-threading is disabled!"
-fi
+# ht=`cat /sys/devices/system/cpu/smt/active`
+# if [ "$ht" = "1" ]; then
+#     echo "Hyper-threading is enabled!"
+#     read -p "Disable Hyperthreading? [y/n]..." answer
+#     if [ "$answer" = "y" ]; then
+#         echo off > /sys/devices/system/cpu/smt/control
+#     fi
+# else
+#     echo "Hyper-threading is disabled!"
+# fi
 
 echo "Disabling Real-time Throttling..."
 echo -1 > /proc/sys/kernel/sched_rt_runtime_us

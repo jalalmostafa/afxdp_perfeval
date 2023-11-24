@@ -10,22 +10,24 @@ fi
 shift
 
 source scripts/mlx5-optimize.sh $NIC $Q
-ethtool -N $NIC rx-flow-hash udp4 fn
-
 
 INTR_STRING=$(cat /proc/interrupts | grep mlx5 | head -${Q} | awk '{printf "%s%s", sep, substr($1, 1, length($1)-1); sep=","} END{print ""}')
 if [ $Q -eq 1 ]; then
     Q_STRING=0
+    ethtool --set-priv-flags $NIC rx_cqe_compress on
 else
     Q_STRING=0-$(($Q - 1))
+    ethtool --set-priv-flags $NIC rx_cqe_compress off
+    ethtool -N $NIC rx-flow-hash udp4 sdfn
 fi
 
-# echo "python3 ./tristan-scripts/tristan-board.py setupx $*"
-# python3 ./tristan-scripts/tristan-board.py setupx $*
-scripts/mlx5-rx-dbg.sh enp2s0np0 | tee log.log &
+scripts/mlx5-rx-dbg.sh enp2s0np0 | tee ethtool.log &
+
+PERF_EV="context-switches,cpu-migrations,cycles,mem-loads,mem-stores,ref-cycles,instructions,LLC-loads,LLC-load-misses,LLC-stores,LLC-store-misses,dTLB-load-misses,dTLB-loads,dTLB-store-misses,dTLB-stores,iTLB-load-misses,branch-instructions,branch-misses,bus-cycles"
 
 pushd src
-CMD="./dqdk -i $NIC -q 0 -b 2048 -A 57 -G -B"
+# /home/jalal/linux-6.1.7/tools/perf/perf stat -e $PERF_EV
+CMD="./dqdk -i $NIC -q $Q_STRING -b 2048 -A $INTR_STRING -G -w"
 echo "Executing DQDK Command is: $CMD"
 
 $CMD

@@ -2,10 +2,10 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_endian.h>
 #include <linux/if_ether.h>
 #include <linux/types.h>
 #include <xdp/xdp_helpers.h>
-#include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 
@@ -28,39 +28,50 @@ struct {
 SEC("xdp/acquire")
 int acquire(struct xdp_md* ctx)
 {
-    unsigned short srcp, dstp;
     void* data = (void*)(long)ctx->data;
     void* data_end = (void*)(long)ctx->data_end;
 
-    if (data >= data_end)
+    if (data >= data_end) {
+        bpf_printk("XDP_DROP: %d\n", __LINE__);
         return XDP_DROP;
+    }
 
-    if (data + ETH_HLEN >= data_end)
+    if (data + ETH_HLEN >= data_end) {
+        bpf_printk("XDP_DROP: %d\n", __LINE__);
         return XDP_DROP;
+    }
 
     struct ethhdr* eth = (struct ethhdr*)data;
-    if (eth + 1 >= data_end)
+    if (eth + 1 >= data_end) {
+        bpf_printk("XDP_DROP: %d\n", __LINE__);
         return XDP_DROP;
+    }
 
-    if (ntohs(eth->h_proto) != ETH_P_IP)
+    if (eth->h_proto != bpf_htons(ETH_P_IP)) {
+        bpf_printk("XDP_PASS: %d\n", __LINE__);
         return XDP_PASS;
+    }
 
-    struct iphdr* ip = (struct iphdr*)eth + 1;
+    struct iphdr* ip = (struct iphdr*)(eth + 1);
 
-    if (ip + 1 >= data_end)
+    if (ip + 1 >= data_end) {
+        bpf_printk("XDP_DROP: %d\n", __LINE__);
         return XDP_DROP;
+    }
 
-    // if (ip->protocol != IPPROTO_UDP)
-    //     return XDP_PASS;
+    if (ip->protocol != IPPROTO_UDP) {
+        bpf_printk("XDP_PASS: %d\n", __LINE__);
+        return XDP_PASS;
+    }
 
-    struct udphdr* udp = (struct udphdr*)ip + 1;
-    if (udp + 1 >= data_end)
+    struct udphdr* udp = (struct udphdr*)(ip + 1);
+    if (udp + 1 >= data_end) {
+        bpf_printk("XDP_DROP: %d\n", __LINE__);
         return XDP_DROP;
+    }
 
-    dstp = ntohs(udp->dest);
-    srcp = ntohs(udp->source);
-    bpf_printk("Srcp %d -- Destp %d\n", srcp, dstp);
-    if (dstp == 5000 || srcp == 5000) {
+    if (udp->dest == bpf_htons(5000) || udp->source == bpf_htons(5000)) {
+        bpf_printk("XDP_PASS: %d\n", __LINE__);
         return XDP_PASS;
     }
 
