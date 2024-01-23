@@ -13,15 +13,13 @@
 #include <errno.h>
 #include <unistd.h>
 
-#include "dlog.h"
-
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-#define DQDK_BIG_ENDIAN 0
-#elif __BYTE_ORDER == __BIG_ENDIAN
-#define DQDK_BIG_ENDIAN 1
+#ifdef __STDC_NO_ATOMICS__
+#error "The used complier or libc do not support atomic numbers"
 #else
-#error "Unknown byte order"
+#include <stdatomic.h>
 #endif
+
+#include "dlog.h"
 
 typedef __u8 u8;
 typedef __u16 u16;
@@ -29,6 +27,7 @@ typedef __u32 u32;
 typedef __u64 u64;
 
 #define always_inline inline __attribute__((always_inline))
+#define packed __attribute__((packed))
 
 #define HUGEPAGE_2MB_SIZE 2097152
 #define HUGETLB_PATH "/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages"
@@ -239,7 +238,7 @@ interrupts_t* nic_get_interrupts(char* irqstr, u32 nprocs)
 
 #define DQDK_RCV_POLL (1 << 0)
 #define DQDK_RCV_RTC (1 << 1)
-#define IS_THREADED(x, nbqs) (x == DQDK_RCV_RTC && nbqs != 1)
+#define IS_THREADED(nbqs) (nbqs != 1)
 #define DQDK_DURATION 3
 
 #define is_power_of_2(x) ((x != 0) && ((x & (x - 1)) == 0))

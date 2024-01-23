@@ -53,13 +53,11 @@ sysctl -w vm.swappiness=0
 
 
 # IRQ affinity
-numa_nodes=`cat /sys/devices/system/node/online`
-if [ "0" = "$numa_nodes" ]; then
+# numa_nodes=`cat /sys/devices/system/node/online`
+# if [ "0" = "$numa_nodes" ]; then
     echo "Disabling irqbalance..."
     systemctl disable irqbalance
     systemctl stop irqbalance
-    echo "Setting IRQ Affinity..."
-    echo "No NUMA nodes were detected"
     irqbalance stop
     # if [[ queues -eq 1 ]]; then
     #     set_irq_affinity_cpulist.sh 3 $NIC
@@ -68,24 +66,24 @@ if [ "0" = "$numa_nodes" ]; then
     #     affinity="0-$lcpu"
     #     set_irq_affinity_cpulist.sh $affinity $NIC
     # fi
-else
-    echo "NUMA nodes were detected: $numa_nodes"
-    mlx5_numa_node=`cat /sys/class/net/$NIC/device/numa_node`
-    echo "NIC is working on NUMA node $mlx5_numa_node"
+# else
+#     echo "NUMA nodes were detected: $numa_nodes"
+#     mlx5_numa_node=`cat /sys/class/net/$NIC/device/numa_node`
+#     echo "NIC is working on NUMA node $mlx5_numa_node"
 
-    echo "Disabling irqbalance..."
-    LOCAL_NUMA_CPUMAP=`cat /sys/devices/system/node/node$mlx5_numa_node/cpumap`
-    IRQBALANCE_BANNED_CPUS=$LOCAL_NUMA_CPUMAP irqbalance --oneshot
-    systemctl stop irqbalance
-    systemctl disable irqbalance
+#     echo "Disabling irqbalance..."
+#     LOCAL_NUMA_CPUMAP=`cat /sys/devices/system/node/node$mlx5_numa_node/cpumap`
+#     IRQBALANCE_BANNED_CPUS=$LOCAL_NUMA_CPUMAP irqbalance --oneshot
+#     systemctl stop irqbalance
+#     systemctl disable irqbalance
 
-    # echo "Setting IRQ Affinity..."
-    # cpulist=`cat /sys/devices/system/node/node$mlx5_numa_node/cpulist`
-    # echo "Affinity of $NIC is set to CPUs $cpulist"
-    # set_irq_affinity_cpulist.sh $cpulist $NIC
-    # echo "Run 'set_irq_affinity_cpulist.sh <numa-node-cpu-ranges> $NIC' with respective CPU list of NUMA Node $mlx5_numa_node"
-    # echo "Run 'lscpu | grep -i numa' to get CPU lists"
-fi
+#     # echo "Setting IRQ Affinity..."
+#     # cpulist=`cat /sys/devices/system/node/node$mlx5_numa_node/cpulist`
+#     # echo "Affinity of $NIC is set to CPUs $cpulist"
+#     # set_irq_affinity_cpulist.sh $cpulist $NIC
+#     # echo "Run 'set_irq_affinity_cpulist.sh <numa-node-cpu-ranges> $NIC' with respective CPU list of NUMA Node $mlx5_numa_node"
+#     # echo "Run 'lscpu | grep -i numa' to get CPU lists"
+# fi
 
 # echo "Optimizing busy poll parameters..."
 # echo 2 > /sys/class/net/$NIC/napi_defer_hard_irqs

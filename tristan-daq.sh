@@ -21,7 +21,7 @@ else
     ethtool -N $NIC rx-flow-hash udp4 sdfn
 fi
 
-scripts/mlx5-rx-dbg.sh enp2s0np0 | tee ethtool.log &
+scripts/mlx5-rx-dbg.sh $NIC | tee ethtool.log &
 
 PERF_EV="context-switches,cpu-migrations,cycles,mem-loads,mem-stores,ref-cycles,instructions,LLC-loads,LLC-load-misses,LLC-stores,LLC-store-misses,dTLB-load-misses,dTLB-loads,dTLB-store-misses,dTLB-stores,iTLB-load-misses,branch-instructions,branch-misses,bus-cycles"
 

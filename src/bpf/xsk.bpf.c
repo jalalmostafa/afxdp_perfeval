@@ -75,5 +75,7 @@ int acquire(struct xdp_md* ctx)
         return XDP_PASS;
     }
 
+    // bpf_printk("SRC Port=%d | DST Port=%d\n", bpf_htons(udp->source), bpf_htons(udp->dest));
+
     return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_DROP);
 }
