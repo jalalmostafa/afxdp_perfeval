@@ -5,7 +5,7 @@
 ## Citation
 
 Please cite our work:
-> J. Mostafa, S. Chilingaryan and A. Kopmann, "Are Kernel Drivers Ready For Accelerated Packet Processing Using AF_XDP?," 2023 IEEE Conference on Network Function Virtualization and Software Defined Networks (NFV-SDN), Dresden, Germany, 2023, pp. 117-122, doi: [10.1109/NFV-SDN59219.2023.10329590](https://doi.org/10.1109/NFV-SDN59219.2023.10329590).
+> **J. Mostafa**, S. Chilingaryan and A. Kopmann, "**Are Kernel Drivers Ready For Accelerated Packet Processing Using AF_XDP?**," 2023 IEEE Conference on Network Function Virtualization and Software Defined Networks (NFV-SDN), Dresden, Germany, 2023, pp. 117-122, doi: [10.1109/NFV-SDN59219.2023.10329590](https://doi.org/10.1109/NFV-SDN59219.2023.10329590).
 
 ### Bibtex
 ```bibtex
