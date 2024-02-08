@@ -2,6 +2,25 @@
 
 [![DOI](https://zenodo.org/badge/448600339.svg)](https://zenodo.org/badge/latestdoi/448600339)
 
+## Citation
+
+Please cite our work:
+> J. Mostafa, S. Chilingaryan and A. Kopmann, "Are Kernel Drivers Ready For Accelerated Packet Processing Using AF_XDP?," 2023 IEEE Conference on Network Function Virtualization and Software Defined Networks (NFV-SDN), Dresden, Germany, 2023, pp. 117-122, doi: 10.1109/NFV-SDN59219.2023.10329590. keywords: {Measurement;Sockets;Linux;Documentation;Throughput;Network function virtualization;Behavioral sciences;AF_XDP;zero-copy networking;software data planes;DPDK;kernel drivers;user-space drivers},
+
+### Bibtex
+```bibtex
+@INPROCEEDINGS{10329590,
+  author={Mostafa, Jalal and Chilingaryan, Suren and Kopmann, Andreas},
+  booktitle={2023 IEEE Conference on Network Function Virtualization and Software Defined Networks (NFV-SDN)}, 
+  title={Are Kernel Drivers Ready For Accelerated Packet Processing Using AF_XDP?}, 
+  year={2023},
+  volume={},
+  number={},
+  pages={117-122},
+  keywords={Measurement;Sockets;Linux;Documentation;Throughput;Network function virtualization;Behavioral sciences;AF_XDP;zero-copy networking;software data planes;DPDK;kernel drivers;user-space drivers},
+  doi={10.1109/NFV-SDN59219.2023.10329590}}
+```
+
 ## Build
 
 For Ubuntu
