@@ -25,6 +25,14 @@ struct {
     __uint(XDP_PASS, 1);
 } XDP_RUN_CONFIG(acquire);
 
+// static const __u16 expected_udp_data_sz;
+
+#define TRISTAN_CPORT 5001
+#define TRISTAN_EXPECTED_PKTSZ 3392
+
+#define UDP_HDRSZ sizeof(struct udphdr)
+#define EXPECTED_PKTSZ (TRISTAN_EXPECTED_PKTSZ + UDP_HDRSZ)
+
 SEC("xdp/acquire")
 int acquire(struct xdp_md* ctx)
 {
@@ -70,8 +78,13 @@ int acquire(struct xdp_md* ctx)
         return XDP_DROP;
     }
 
-    if (udp->dest == bpf_htons(5000) || udp->source == bpf_htons(5000)) {
+    if (udp->dest == bpf_htons(TRISTAN_CPORT) || udp->source == bpf_htons(TRISTAN_CPORT)) {
         bpf_printk("XDP_PASS: %d\n", __LINE__);
+        return XDP_PASS;
+    }
+
+    if (udp->len != bpf_htons(EXPECTED_PKTSZ)) {
+        bpf_printk("XDP_PASS: %d - UDP Len %d\n", __LINE__, bpf_ntohs(udp->len));
         return XDP_PASS;
     }
 

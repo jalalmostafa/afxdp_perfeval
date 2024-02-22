@@ -1,7 +1,7 @@
 TOOL_NAME       := dqdk
 XDP_TARGETS     := bpf/xsk.bpf
 USER_TARGETS    := dqdk
-EXTRA_USER_DEPS := tcpip/* dlog.h dqdk.h
+EXTRA_USER_DEPS := tcpip/* dlog.h dqdk.h tristan.h
 TEST_FILE       := 
 
 LIB_DIR          = $(abspath ../xdp-tools/lib)

@@ -2,7 +2,6 @@
 #define DQDK_TYPES_H
 
 #include <linux/mman.h>
-#include <linux/types.h>
 #include <linux/limits.h>
 #include <pthread.h>
 #include <sys/mman.h>
@@ -12,6 +11,9 @@
 #include <numa.h>
 #include <errno.h>
 #include <unistd.h>
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
+#include <bpf/btf.h>
 
 #ifdef __STDC_NO_ATOMICS__
 #error "The used complier or libc do not support atomic numbers"
@@ -20,14 +22,7 @@
 #endif
 
 #include "dlog.h"
-
-typedef __u8 u8;
-typedef __u16 u16;
-typedef __u32 u32;
-typedef __u64 u64;
-
-#define always_inline inline __attribute__((always_inline))
-#define packed __attribute__((packed))
+#include "ctypes.h"
 
 #define HUGEPAGE_2MB_SIZE 2097152
 #define HUGETLB_PATH "/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages"
@@ -243,6 +238,7 @@ interrupts_t* nic_get_interrupts(char* irqstr, u32 nprocs)
 
 #define is_power_of_2(x) ((x != 0) && ((x & (x - 1)) == 0))
 #define popcountl(x) __builtin_popcountl(x)
+#define log2l(x) (31 - __builtin_clz(x))
 
 int is_smt()
 {
@@ -269,5 +265,73 @@ exit:
     free(siblings);
     return isibling;
 }
+
+struct xsk_stat {
+    u64 rcvd_frames;
+    u64 rcvd_pkts;
+    u64 fail_polls;
+    u64 timeout_polls;
+    u64 rx_empty_polls;
+    u64 rx_fill_fail_polls;
+    u64 rx_successful_fills;
+    u64 tx_successful_fills;
+    u64 invalid_ip_pkts;
+    u64 invalid_udp_pkts;
+    u64 runtime;
+    u64 tx_wakeup_sendtos;
+    u64 sent_frames;
+    u64 tristan_outoforder;
+    u64 tristan_dups;
+    u64 tristan_histogram_evts;
+    u64 tristan_histogram_lost_evts;
+    struct xdp_statistics xstats;
+};
+
+typedef struct {
+    struct xsk_umem* umem;
+    struct xsk_ring_prod fq0;
+    struct xsk_ring_cons cq0;
+    u32 size;
+    void* buffer;
+    u8 flags;
+} umem_info_t;
+
+typedef struct {
+    u16 index;
+    u16 queue_id;
+    struct xsk_socket* socket;
+    struct xsk_ring_prod tx;
+    struct xsk_ring_cons rx;
+    umem_info_t* umem_info;
+    u32 libbpf_flags;
+    u32 xdp_flags;
+    u16 bind_flags;
+    u32 batch_size;
+    u8 busy_poll;
+    struct xsk_stat stats;
+    u8* large_mem;
+    int last_idx;
+    void* private;
+} xsk_info_t;
+
+int bpf_init_global_var(struct bpf_object* obj, const char* section, const char* varname, void* newvalue)
+{
+    /**
+     * FIXME: this will work as long as there is one variable in the section
+     * once we have more than one variable then we have to iterate over the
+     * variables using BTF information. For more information, check:
+     * https://stackoverflow.com/questions/70475993/how-to-let-user-space-to-populate-an-ebpf-global-data-at-load-time
+     */
+    size_t ivaluesz;
+    IGN_ARG(varname);
+    struct bpf_map* map = bpf_object__find_map_by_name(obj, section);
+    if (!map)
+        return -1;
+
+    bpf_map__initial_value(map, &ivaluesz);
+    return bpf_map__set_initial_value(map, newvalue, ivaluesz);
+}
+
+#define bpf_init_rodata_var(obj, varname, newvalue) bpf_init_global_var(obj, ".rodata", varname, newvalue)
 
 #endif

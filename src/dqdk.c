@@ -39,6 +39,12 @@
 #include "dqdk.h"
 #include "tcpip/ipv4.h"
 #include "tcpip/udp.h"
+#include "tristan.h"
+
+typedef struct {
+    xsk_info_t* xsk;
+    tristan_mode_t tristan_mode;
+} dqdk_ctx_t;
 
 #define UMEM_FACTOR 64
 #define UMEM_LEN (XSK_RING_PROD__DEFAULT_NUM_DESCS * UMEM_FACTOR)
@@ -54,61 +60,17 @@
 #define UMEM_FLAGS_UNALIGNED (1 << 1)
 #define LARGE_MEMSZ ((u64)100 * 1024 * 1024 * 1024)
 
-struct xsk_stat {
-    u64 rcvd_frames;
-    u64 rcvd_pkts;
-    u64 fail_polls;
-    u64 timeout_polls;
-    u64 rx_empty_polls;
-    u64 rx_fill_fail_polls;
-    u64 rx_successful_fills;
-    u64 tx_successful_fills;
-    u64 invalid_ip_pkts;
-    u64 invalid_udp_pkts;
-    u64 runtime;
-    u64 tx_wakeup_sendtos;
-    u64 sent_frames;
-    u64 tristan_outoforder;
-    u64 tristan_dups;
-    struct xdp_statistics xstats;
-};
-
-typedef struct {
-    struct xsk_umem* umem;
-    struct xsk_ring_prod fq0;
-    struct xsk_ring_cons cq0;
-    u32 size;
-    void* buffer;
-    u8 flags;
-} umem_info;
-
-typedef struct {
-    u16 index;
-    u16 queue_id;
-    struct xsk_socket* socket;
-    struct xsk_ring_prod tx;
-    struct xsk_ring_cons rx;
-    umem_info* umem_info;
-    u32 libbpf_flags;
-    u32 xdp_flags;
-    u16 bind_flags;
-    u32 batch_size;
-    u8 busy_poll;
-    struct xsk_stat stats;
-    u8* large_mem;
-    int last_idx;
-} xsk_info;
-
 volatile u32 break_flag = 0;
+static tristan_histo_t* histo = NULL;
 
 static void* umem_buffer_create(u32 size, u8 flags, int driver_numa)
 {
     return flags & UMEM_FLAGS_USE_HGPG ? huge_malloc(driver_numa, size) : mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 }
 
-static umem_info* umem_info_create(u32 size, u8 flags, int driver_numa)
+static umem_info_t* umem_info_create(u32 size, u8 flags, int driver_numa)
 {
-    umem_info* info = (umem_info*)calloc(1, sizeof(umem_info));
+    umem_info_t* info = (umem_info_t*)calloc(1, sizeof(umem_info_t));
 
     info->size = size;
     info->buffer = umem_buffer_create(info->size, flags, driver_numa);
@@ -122,7 +84,7 @@ static umem_info* umem_info_create(u32 size, u8 flags, int driver_numa)
     return info;
 }
 
-static void umem_info_free(umem_info* info)
+static void umem_info_free(umem_info_t* info)
 {
     if (info != NULL) {
         munmap(info->buffer, info->size);
@@ -130,7 +92,7 @@ static void umem_info_free(umem_info* info)
     }
 }
 
-static int umem_configure(umem_info* umem)
+static int umem_configure(umem_info_t* umem)
 {
     int ret;
 
@@ -157,7 +119,7 @@ static int umem_configure(umem_info* umem)
     return 0;
 }
 
-static int xsk_configure(xsk_info* xsk, const char* ifname)
+static int xsk_configure(xsk_info_t* xsk, const char* ifname)
 {
     int ret = 0;
     const struct xsk_socket_config xsk_config = {
@@ -169,10 +131,10 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
     };
 
     struct xsk_ring_prod* fq = &xsk->umem_info->fq0;
-    // struct xsk_ring_cons* cq = &xsk->umem_info->cq0;
+    struct xsk_ring_cons* cq = &xsk->umem_info->cq0;
 
     ret = xsk_socket__create_shared(&xsk->socket, ifname, xsk->queue_id,
-        xsk->umem_info->umem, &xsk->rx, NULL, fq, NULL, &xsk_config);
+        xsk->umem_info->umem, &xsk->rx, &xsk->tx, fq, cq, &xsk_config);
     if (ret) {
         dlog_error2("xsk_socket__create", ret);
         return ret;
@@ -207,7 +169,7 @@ static int xsk_configure(xsk_info* xsk, const char* ifname)
     return 0;
 }
 
-static int fq_ring_configure(xsk_info* xsk)
+static int fq_ring_configure(xsk_info_t* xsk)
 {
     // push all frames to fill ring
     u32 idx = 0, ret, fqlen = FILLQ_LEN;
@@ -229,7 +191,7 @@ static int fq_ring_configure(xsk_info* xsk)
     return 0;
 }
 
-always_inline u8* get_udp_payload(xsk_info* xsk, u8* buffer, u32 len, u32* datalen)
+always_inline u8* get_udp_payload(xsk_info_t* xsk, u8* buffer, u32 len, u32* datalen)
 {
     struct ethhdr* frame = (struct ethhdr*)buffer;
     u16 ethertype = ntohs(frame->h_proto);
@@ -266,7 +228,7 @@ always_inline u8* get_udp_payload(xsk_info* xsk, u8* buffer, u32 len, u32* datal
     return (u8*)(udp + 1);
 }
 
-static always_inline int do_daq(xsk_info* xsk, umem_info* umem)
+static always_inline int do_daq(xsk_info_t* xsk, umem_info_t* umem, tristan_mode_t mode)
 {
     u32 idx_rx = 0, idx_fq = 0, datalen = 0;
     struct xsk_ring_prod* fq = &umem->fq0;
@@ -316,23 +278,16 @@ static always_inline int do_daq(xsk_info* xsk, umem_info* umem)
         u8* data = get_udp_payload(xsk, frame, len, &datalen);
 
         if (datalen != 0 && data != NULL) {
-            // detector data
-            memcpy(xsk->large_mem, data, datalen);
-            // rte_memcpy(xsk->large_mem, data, datalen);
-            u64* nt_counter = (u64*)data;
-            u64 hst_counter = nt_counter[0];
-
-            if (xsk->last_idx != -1) {
-                int diff = hst_counter - xsk->last_idx;
-                if (diff == 0) {
-                    printf("dups is %llu\n", hst_counter);
-                    ++xsk->stats.tristan_dups;
-                } else {
-                    ++xsk->stats.tristan_outoforder;
-                }
+            switch (mode) {
+            case TRISTAN_MODE_RAW:
+                tristan_daq_raw(xsk, data, datalen);
+                break;
+            case TRISTAN_MODE_HISTOGRAM:
+                tristan_daq_histo((tristan_histo_t*)xsk->private, xsk, data, datalen);
+                break;
+            default:
+                break;
             }
-
-            xsk->last_idx = hst_counter;
         }
 
         // if (umem->flags & UMEM_FLAGS_UNALIGNED) {
@@ -351,12 +306,14 @@ static always_inline int do_daq(xsk_info* xsk, umem_info* umem)
 
 void* tristan_daq(void* rxctx_ptr)
 {
-    xsk_info* xsk = (xsk_info*)rxctx_ptr;
+    dqdk_ctx_t* ctx = (dqdk_ctx_t*)rxctx_ptr;
+    xsk_info_t* xsk = ctx->xsk;
+    tristan_mode_t mode = ctx->tristan_mode;
     u64 t0, t1;
 
     t0 = clock_nsecs();
     while (!break_flag) {
-        do_daq(xsk, xsk->umem_info);
+        do_daq(xsk, xsk->umem_info, mode);
     }
     t1 = clock_nsecs();
 
@@ -419,7 +376,10 @@ void stats_dump(struct xsk_stat* stats)
            "    X-XSK TX Invalid Descs:   %llu\n"
            "    X-XSK TX Ring Empty:      %llu\n"
            "    TRISTAN Out-of-Order:     %llu\n"
-           "    TRISTAN Duplicates:       %llu\n",
+           "    TRISTAN Duplicates:       %llu\n"
+           "    TRISTAN Hist Events:      %llu\n"
+           "    TRISTAN Hist Lost Events: %llu\n",
+
         stats->runtime, stats->rcvd_frames,
         AVG_PPS(stats->rcvd_frames, stats->runtime), stats->rcvd_pkts,
         AVG_PPS(stats->rcvd_pkts, stats->runtime), stats->sent_frames,
@@ -433,10 +393,11 @@ void stats_dump(struct xsk_stat* stats)
         stats->xstats.rx_dropped, stats->xstats.rx_fill_ring_empty_descs,
         stats->xstats.rx_invalid_descs, stats->xstats.rx_ring_full,
         stats->xstats.tx_invalid_descs, stats->xstats.tx_ring_empty_descs,
-        stats->tristan_outoforder, stats->tristan_dups);
+        stats->tristan_outoforder, stats->tristan_dups,
+        stats->tristan_histogram_evts, stats->tristan_histogram_lost_evts);
 }
 
-void xsk_stats_dump(xsk_info* xsk)
+void xsk_stats_dump(xsk_info_t* xsk)
 {
     printf("XSK %u on Queue %u Statistics:\n", xsk->index, xsk->queue_id);
     stats_dump(&xsk->stats);
@@ -554,6 +515,7 @@ int main(int argc, char** argv)
     int opt_selnumanode = 0;
 
     // program variables
+    tristan_mode_t mode;
     int ifindex, ret, opt, timer_flag = -1;
     u32 nbqueues = 0, nbirqs = 0, nprocs = 0, umem_size = UMEM_SIZE;
     struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
@@ -564,7 +526,8 @@ int main(int argc, char** argv)
     pthread_t* xsk_workers = NULL;
     pthread_attr_t* xsk_worker_attrs = NULL;
     cpu_set_t* cpusets = NULL;
-    xsk_info* xsks = NULL;
+    xsk_info_t* xsks = NULL;
+    dqdk_ctx_t* ctxs = NULL;
     timer_t timer;
     socklen_t socklen;
     // NUMA
@@ -583,7 +546,7 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    while ((opt = getopt(argc, argv, "b:cd:hi:m:p:q:s:uvwt:A:BI:M:D:HGSN:")) != -1) {
+    while ((opt = getopt(argc, argv, "b:cd:hi:m:p:q:s:uvwt:A:BI:M:D:HGSN:M:")) != -1) {
         switch (opt) {
         case 'h':
             dqdk_usage(argv);
@@ -600,14 +563,14 @@ int main(int argc, char** argv)
                     irq = strtol(cursor, &delimiter, 10);
                     if (errno != 0
                         || cursor == delimiter
-                        || (delimiter[0] != ',' && delimiter[0] != '\0')) {
+                        || (delimiter[0] != ',' && delimiter[0] != 0)) {
                         dlog_error("Invalid IRQ string");
                         goto cleanup;
                     }
 
                     cursor = delimiter + 1;
                     opt_irqs[nbirqs++] = irq;
-                } while (delimiter[0] != '\0');
+                } while (delimiter[0] != 0);
             }
             break;
         case 'd':
@@ -676,6 +639,16 @@ int main(int argc, char** argv)
         case 'N':
             selnumanode = 1;
             opt_selnumanode = atoi(optarg);
+            break;
+        case 'M':
+            if (strcmp(optarg, "histo") == 0) {
+                mode = TRISTAN_MODE_HISTOGRAM;
+            } else if (strcmp(optarg, "raw") == 0) {
+                mode = TRISTAN_MODE_RAW;
+            } else {
+                dlog_errorv("Unknown TRISTAN mode: %s", optarg);
+                exit(EXIT_FAILURE);
+            }
             break;
         default:
             dqdk_usage(argv);
@@ -783,21 +756,27 @@ int main(int argc, char** argv)
     }
 
     kern_prog = xdp_program__open_file(xdp_filename, NULL, NULL);
+    struct bpf_object* obj = xdp_program__bpf_obj(kern_prog);
+    // int packetsz = 3392;
+
+    // ret = bpf_init_rodata_var(obj, "expected_udp_data_sz", (void*)&packetsz);
+    // if (ret) {
+    //     dlog_error2("bpf_set_rodata_var", ret);
+    //     goto cleanup;
+    // }
+
     ret = xdp_program__attach(kern_prog, ifindex, XDP_MODE_NATIVE, 0);
+    int mapfd = bpf_object__find_map_fd_by_name(obj, "xsks_map");
+
     if (ret < 0) {
         kern_prog = NULL;
         dlog_error2("xdp_program__attach", ret);
         goto cleanup;
     }
 
-    struct bpf_object* obj = xdp_program__bpf_obj(kern_prog);
-    int mapfd = bpf_object__find_map_fd_by_name(obj, "xsks_map");
-
-    if (IS_THREADED(nbqueues)) {
-        xsk_workers = (pthread_t*)calloc(nbxsks, sizeof(pthread_t));
-    }
-
-    xsks = (xsk_info*)calloc(nbxsks, sizeof(xsk_info));
+    xsk_workers = (pthread_t*)calloc(nbxsks, sizeof(pthread_t));
+    xsks = (xsk_info_t*)calloc(nbxsks, sizeof(xsk_info_t));
+    ctxs = (dqdk_ctx_t*)calloc(nbxsks, sizeof(dqdk_ctx_t));
     xsk_worker_attrs = (pthread_attr_t*)calloc(nbxsks, sizeof(pthread_attr_t));
     cpusets = (cpu_set_t*)calloc(nbxsks, sizeof(cpu_set_t));
 
@@ -812,7 +791,8 @@ int main(int argc, char** argv)
     if (opt_irqstring != NULL) {
         before_interrupts = nic_get_interrupts(opt_irqstring, nprocs);
     }
-    // large_mem = huge_malloc(LARGE_MEMSZ);
+
+    histo = (tristan_histo_t*)huge_malloc(driver_numa_node, TRISTAN_HISTO_SZ);
 
     for (u32 i = 0; i < nbxsks; i++) {
         xsks[i].last_idx = -1;
@@ -824,6 +804,7 @@ int main(int argc, char** argv)
         xsks[i].xdp_flags = 0;
         xsks[i].queue_id = opt_queues[i];
         xsks[i].index = i;
+        xsks[i].private = huge_malloc(driver_numa_node, TRISTAN_HISTO_SZ);
 
         xsks[i].umem_info = umem_info_create(umem_size, opt_umem_flags, driver_numa_node);
         ret = umem_configure(xsks[i].umem_info);
@@ -864,25 +845,24 @@ int main(int argc, char** argv)
             }
         }
 
-        if (IS_THREADED(nbqueues)) {
-            pthread_attr_t* attrs = &xsk_worker_attrs[i];
+        pthread_attr_t* attrs = &xsk_worker_attrs[i];
 
-            pthread_attr_init(attrs);
-            // Set process and interrupt affinity to same CPU
-            ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[i], &cpu_mask, &cpusets[i], attrs);
-            if (ret)
-                goto cleanup;
+        pthread_attr_init(attrs);
+        // Set process and interrupt affinity to same CPU
+        ret = dqdk_set_affinity(opt_hyperthreading, opt_samecore, opt_irqs[i], &cpu_mask, &cpusets[i], attrs);
+        if (ret)
+            goto cleanup;
 
-            // FIXME: make sure passing xsks array does not cause false sharing
-            pthread_create(&xsk_workers[i], attrs, tristan_daq, (void*)&xsks[i]);
-        }
+        dqdk_ctx_t* ctx = &ctxs[i];
+        ctx->xsk = &xsks[i];
+        ctx->tristan_mode = mode;
+        pthread_create(&xsk_workers[i], attrs, tristan_daq, (void*)ctx);
     }
 
     struct xsk_stat avg_stats;
     memset(&avg_stats, 0, sizeof(avg_stats));
     for (u32 i = 0; i < nbxsks; i++) {
-        if (IS_THREADED(nbqueues))
-            pthread_join(xsk_workers[i], NULL);
+        pthread_join(xsk_workers[i], NULL);
 
         xsk_stats_dump(&xsks[i]);
         avg_stats.runtime = MAX(avg_stats.runtime, xsks[i].stats.runtime);
@@ -909,6 +889,8 @@ int main(int argc, char** argv)
 
         avg_stats.tristan_outoforder += xsks[i].stats.tristan_outoforder;
         avg_stats.tristan_dups += xsks[i].stats.tristan_dups;
+        avg_stats.tristan_histogram_evts += xsks[i].stats.tristan_histogram_evts;
+        avg_stats.tristan_histogram_lost_evts += xsks[i].stats.tristan_histogram_lost_evts;
     }
 
     finished = 1;
@@ -927,11 +909,14 @@ cleanup:
      * break the running ones so we do not cause a segfault by
      * freeing data for the running ones
      */
-    if (!finished && xsk_workers != NULL && IS_THREADED(nbqueues)) {
+    if (!finished && xsk_workers != NULL) {
         break_flag = 1;
         for (u32 i = 0; i < nbxsks; i++)
             pthread_join(xsk_workers[i], NULL);
     }
+
+    if (ctxs != NULL)
+        free(ctxs);
 
     if (after_interrupts != NULL && before_interrupts != NULL) {
         u32 sum = 0;
@@ -970,7 +955,7 @@ cleanup:
 
     if (xsks != NULL) {
         for (size_t i = 0; i < nbxsks; i++) {
-            xsk_info xsk = xsks[i];
+            xsk_info_t xsk = xsks[i];
             xsk_socket__delete(xsk.socket);
 
             if (xsk.umem_info != NULL) {
@@ -982,6 +967,9 @@ cleanup:
                 // munmap(large_mem, LARGE_MEMSZ);
                 free(xsk.large_mem);
             }
+
+            if (xsk.private != NULL)
+                munmap(xsk.private, TRISTAN_HISTO_SZ);
         }
         free(xsks);
 
@@ -1002,7 +990,11 @@ cleanup:
         free(cpusets);
     }
 
-    if (opt_umem_flags & UMEM_FLAGS_USE_HGPG) {
+    if (histo != NULL) {
+        munmap(histo, TRISTAN_HISTO_SZ);
+    }
+
+    if (histo != NULL || (opt_umem_flags & UMEM_FLAGS_USE_HGPG)) {
         set_hugepages(driver_numa_node, 0);
     }
 }

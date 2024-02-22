@@ -1,12 +1,18 @@
 #! /bin/bash
 NIC=$1
+MODE=$2
 Q=2
 if [ "$NIC" == "" ]; then
     echo "NIC Name is not specified"
     echo "$0 <NIC>"
     exit
 fi
+shift
 
+DQDK_MODE="-M raw"
+if [ "$MODE" == "histo" ]; then
+    DQDK_MODE="-M histo"
+fi
 shift
 
 source scripts/mlx5-optimize.sh $NIC $Q
@@ -26,8 +32,8 @@ scripts/mlx5-rx-dbg.sh $NIC | tee ethtool.log &
 PERF_EV="context-switches,cpu-migrations,cycles,mem-loads,mem-stores,ref-cycles,instructions,LLC-loads,LLC-load-misses,LLC-stores,LLC-store-misses,dTLB-load-misses,dTLB-loads,dTLB-store-misses,dTLB-stores,iTLB-load-misses,branch-instructions,branch-misses,bus-cycles"
 
 pushd src
-# /home/jalal/linux-6.1.7/tools/perf/perf stat -e $PERF_EV
-CMD="./dqdk -i $NIC -q $Q_STRING -b 2048 -A $INTR_STRING -G -w"
+#CMD="perf stat -e $PERF_EV ./dqdk -i $NIC -q $Q_STRING -b 2048 -A $INTR_STRING -G -w $DQDK_MODE"
+CMD="./dqdk -i $NIC -q $Q_STRING -b 2048 -A $INTR_STRING -G -w $DQDK_MODE"
 echo "Executing DQDK Command is: $CMD"
 
 $CMD
