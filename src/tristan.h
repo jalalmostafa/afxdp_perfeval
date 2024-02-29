@@ -85,7 +85,7 @@ always_inline int tristan_daq_histo(tristan_histo_t* histo, xsk_info_t* xsk, u8*
         int histo_idx = log2l(evt.mask);
         histo->channels[evt.channel].histograms[histo_idx][evt.energy]++;
 
-        if (last_evt_id != -1 && evt.id - last_evt_id > 1)
+        if (last_evt_id != -1 && evt.id - last_evt_id > 3)
             xsk->stats.tristan_histogram_lost_evts += evt.id - last_evt_id - 1;
 
         last_evt_id = evt.id;
